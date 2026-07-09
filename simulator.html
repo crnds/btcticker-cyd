@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>btcticker-cyd — Simulator</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px; background: #14161a; color: #ddd;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; color: #fff; }
+  .sub { font-size: 13px; color: #888; margin: 0 0 18px; max-width: 640px; }
+  .device {
+    background: #f4d43c; padding: 18px 18px 26px; border-radius: 14px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5); position: relative; flex: 0 0 auto;
+  }
+  .device .brand { font-size: 10px; color: #7a6a10; text-align: center; margin-bottom: 8px; letter-spacing: .05em; }
+  .screen-wrap { position: relative; border: 3px solid #222; border-radius: 4px; overflow: hidden; }
+  canvas { display: block; cursor: pointer; }
+  .dim-overlay { position: absolute; inset: 0; background: #000; pointer-events: none; }
+  .led { position: absolute; top: 8px; right: 14px; width: 8px; height: 8px; border-radius: 50%; background: #300; }
+  .led.on { background: #f22; box-shadow: 0 0 6px #f22; }
+  .hint { text-align: center; font-size: 10px; color: #7a6a10; margin-top: 8px; }
+
+  .panel { flex: 1 1 420px; min-width: 380px; max-width: 560px; }
+  fieldset {
+    border: 1px solid #333; border-radius: 8px; margin: 0 0 14px; padding: 10px 14px 14px;
+  }
+  legend { font-size: 12px; color: #9c9; padding: 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+  .row label { font-size: 12px; color: #aaa; min-width: 70px; }
+  input[type=number], input[type=text] {
+    background: #1e2024; border: 1px solid #3a3d42; color: #eee; border-radius: 4px;
+    padding: 4px 6px; width: 90px; font-size: 13px;
+  }
+  input[type=range] { flex: 1; }
+  button {
+    background: #2a2d33; border: 1px solid #4a4e56; color: #eee; border-radius: 6px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { background: #34383f; }
+  button.primary { background: #f7931a; border-color: #f7931a; color: #1a1a1a; font-weight: 600; }
+  button.primary:hover { background: #ffa22e; }
+  .btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
+  .checkrow { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; }
+  #hud { font-size: 11px; color: #999; line-height: 1.6; }
+  #hud b { color: #ddd; }
+  #log {
+    background: #0c0d0f; border: 1px solid #333; border-radius: 6px; padding: 8px;
+    height: 140px; overflow-y: auto; font: 11px/1.5 ui-monospace, Menlo, monospace; color: #8f8;
+  }
+  #log div.err { color: #f77; }
+</style>
+</head>
+<body>
+
+<div class="device">
+  <div class="brand">CYD · ESP32-2432S028R</div>
+  <div class="screen-wrap">
+    <canvas id="screen" width="640" height="480"></canvas>
+    <div class="dim-overlay" id="dimOverlay"></div>
+    <div class="led" id="led" title="offline beacon (case RGB LED)"></div>
+  </div>
+  <div class="hint">click screen = tap (cycle backlight)</div>
+</div>
+
+<div class="panel">
+  <h1>btcticker-cyd Simulator</h1>
+  <p class="sub">
+    Renders the same layout and job/retry logic as <code>src/main.cpp</code> /
+    <code>src/ui/screen.cpp</code>, fetching the same live APIs the firmware calls
+    (Binance, mempool.space, alternative.me) directly from this browser tab — no board,
+    no flashing. If a fetch fails with a CORS/network error in the log, use the
+    manual override fields below to preview the visuals anyway, or serve this file
+    over <code>python3 -m http.server</code> instead of opening it via <code>file://</code>.
+  </p>
+
+  <fieldset>
+    <legend>Live data (auto-poll)</legend>
+    <div class="row">
+      <label class="checkrow"><input type="checkbox" id="autoPoll" checked> auto-poll</label>
+      <label class="checkrow"><input type="checkbox" id="demoHourly" checked> demo speed for F&amp;G / CDC (20s instead of 1h)</label>
+    </div>
+    <div class="row">
+      <label class="checkrow"><input type="checkbox" id="simOffline"> simulate Wi-Fi offline</label>
+    </div>
+    <div class="btnrow">
+      <button data-fetch="price">Fetch price</button>
+      <button data-fetch="fees">Fetch fees</button>
+      <button data-fetch="fng">Fetch F&amp;G</button>
+      <button data-fetch="cdc">Fetch CDC</button>
+      <button class="primary" id="fetchAll">Fetch all now</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Manual overrides</legend>
+    <div class="row">
+      <label>Price $</label><input type="number" id="ovPrice" step="0.01" value="98000">
+      <label>24h chg %</label><input type="number" id="ovChange" step="0.1" value="2.5">
+      <button data-apply="price">Apply</button>
+    </div>
+    <div class="row">
+      <label>Fees</label>
+      <input type="number" id="ovNo" placeholder="No" value="1" step="0.1" style="width:56px">
+      <input type="number" id="ovLow" placeholder="Low" value="3" step="0.1" style="width:56px">
+      <input type="number" id="ovMed" placeholder="Med" value="8" step="0.1" style="width:56px">
+      <input type="number" id="ovHigh" placeholder="High" value="20" step="0.1" style="width:56px">
+      <button data-apply="fees">Apply</button>
+    </div>
+    <div class="row">
+      <label>F&amp;G</label><input type="range" id="ovFng" min="0" max="100" value="50">
+      <span id="ovFngVal">50</span>
+      <button data-apply="fng">Apply</button>
+    </div>
+    <div class="row">
+      <label>CDC</label>
+      <div class="btnrow">
+        <button data-cdc="bull">All bull</button>
+        <button data-cdc="bear">All bear</button>
+        <button data-cdc="zigzag">Zig-zag</button>
+        <button data-cdc="random">Randomize</button>
+      </div>
+    </div>
+    <div class="row">
+      <label>Presets</label>
+      <div class="btnrow">
+        <button data-preset="bull">Bull run</button>
+        <button data-preset="bear">Bear market</button>
+        <button data-preset="panic">Panic dip</button>
+        <button data-preset="neutral">Neutral</button>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Backlight / touch</legend>
+    <div class="row">
+      <label>LDR</label><input type="range" id="ldr" min="0" max="4095" value="2000">
+      <span id="ldrVal">2000</span>
+    </div>
+    <div class="btnrow">
+      <button id="tapBtn">Tap screen (cycle mode)</button>
+      <button id="restartBtn">Simulate daily restart</button>
+      <button id="resetCacheBtn">Reset cached state</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Status</legend>
+    <div id="hud"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Log <button id="clearLog" style="float:right">clear</button></legend>
+    <div id="log"></div>
+  </fieldset>
+</div>
+
+<script>
+// ── CONFIG — mirrors include/config.h ────────────────────
+const CONFIG = {
+  PRICE_URL:  'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT',
+  KLINES_URL: 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=100',
+  FEES_URL:   'https://mempool.space/api/v1/fees/mempool-blocks',
+  FNG_URL:    'https://api.alternative.me/fng/?limit=1',
+  PRICE_INTERVAL_MS: 10000,
+  FEES_INTERVAL_MS:  60000,
+  FNG_INTERVAL_MS:   3600000,
+  CDC_INTERVAL_MS:   3600000,
+  RETRY_BASE_MS: 1000,
+  RETRY_MAX_MS:  60000,
+  LDR_BRIGHT_RAW: 300,
+  LDR_DARK_RAW:   3800,
+  BL_MIN_DUTY:    30,
+};
+CONFIG.PRICE_STALE_MS = 3 * CONFIG.PRICE_INTERVAL_MS + 30000;
+CONFIG.FEES_STALE_MS  = 3 * CONFIG.FEES_INTERVAL_MS;
+
+// ── STATE — mirrors include/state.h ──────────────────────
+function defaultState() {
+  return {
+    price: 0, changePct: NaN, priceOkMs: 0,
+    fees: { no: NaN, low: NaN, med: NaN, high: NaN }, feesOkMs: 0,
+    fng: -1, fngOkMs: 0,
+    cdc: [], cdcValid: false, cdcOkMs: 0,
+    netState: 0,
+  };
+}
+let S = defaultState();
+
+// ── THEME — mirrors src/ui/theme.h ───────────────────────
+const THEME = { bg: '#000', text: '#E8E8E8', dec: '#BDBDBD', dim: '#9E9E9E',
+                 green: '#00E676', red: '#FF1744', orange: '#F7931A' };
+const FNG_COLORS = ['#FF1744', '#FF6D00', '#FFEB3B', '#69F0AE', '#00E676'];
+const fngColor = v => FNG_COLORS[Math.min(Math.floor(v / 20), 4)];
+
+// logical 320x240 coordinate space, same numbers as screen.cpp
+const L = { PRICE_Y_TOP: 26, PRICE_Y_H: 56, SUB_Y_TOP: 84, SUB_Y_H: 28,
+            CDC_BASE_Y: 156, CDC_MAX_H: 38, CDC_MIN_H: 3,
+            FEES_Y_TOP: 204, FEES_Y_H: 32 };
+
+const cvs = document.getElementById('screen');
+const ctx = cvs.getContext('2d');
+const SCALE = 2;
+ctx.scale(SCALE, SCALE);
+
+const fmtThousands = v => Math.round(v).toLocaleString('en-US');
+const fmtFee = v => (v == null || isNaN(v)) ? '-' : (v >= 1 ? String(Math.round(v)) : v.toFixed(1));
+
+function drawStatus() {
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, 320, 24);
+  const dot = S.netState === 1 ? THEME.green : S.netState === 0 ? THEME.orange : THEME.red;
+  ctx.beginPath(); ctx.fillStyle = dot; ctx.arc(14, 12, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.font = '13px sans-serif'; ctx.fillStyle = THEME.dim; ctx.textBaseline = 'middle';
+  const labels = ['connecting...', 'live', 'reconnecting...'];
+  ctx.textAlign = 'left';  ctx.fillText(labels[S.netState], 26, 13);
+  ctx.textAlign = 'right'; ctx.fillText('Binance', 310, 13);
+}
+
+function drawPrice() {
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, 320, L.PRICE_Y_H);
+  const stale = !S.priceOkMs || Date.now() - S.priceOkMs > CONFIG.PRICE_STALE_MS;
+  const txt = S.price > 0 ? fmtThousands(S.price) : '-----';
+  ctx.font = 'bold 40px sans-serif';
+  ctx.fillStyle = stale ? THEME.dim : THEME.text;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, 160, L.PRICE_Y_TOP + L.PRICE_Y_H / 2);
+}
+
+function drawSub() {
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.SUB_Y_TOP, 320, L.SUB_Y_H);
+  const priceStale = !S.priceOkMs || Date.now() - S.priceOkMs > CONFIG.PRICE_STALE_MS;
+  const fngStale   = !S.fngOkMs   || Date.now() - S.fngOkMs   > fngStaleMs();
+  const segs = [];
+  if (S.price > 0) {
+    const dec = String(Math.round((S.price * 100) % 100)).padStart(2, '0');
+    segs.push({ t: '.' + dec, c: priceStale ? THEME.dim : THEME.dec });
+  }
+  if (S.fng >= 0) segs.push({ t: '   ' + S.fng, c: fngStale ? THEME.dim : fngColor(S.fng) });
+  if (!isNaN(S.changePct)) {
+    const c = (S.changePct >= 0 ? '+' : '') + Math.round(S.changePct) + '%';
+    segs.push({ t: '   ' + c, c: S.changePct >= 0 ? THEME.green : THEME.red });
+  }
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const total = segs.reduce((w, s) => w + ctx.measureText(s.t).width, 0);
+  let x = (320 - total) / 2;
+  const y = L.SUB_Y_TOP + L.SUB_Y_H / 2 + 2;
+  for (const s of segs) { ctx.fillStyle = s.c; ctx.fillText(s.t, x, y); x += ctx.measureText(s.t).width; }
+}
+
+function drawCDC() {
+  const top = L.CDC_BASE_Y - L.CDC_MAX_H - 2;
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, top, 320, 2 * L.CDC_MAX_H + 4);
+  if (!S.cdcValid || !S.cdc.length) return;
+  const diffs = S.cdc.map(b => b.diff);
+  const mn = Math.min(...diffs), mx = Math.max(...diffs);
+  const range = (mx - mn) || 1;
+  const X0 = 10, SLOT = 10, BARW = 7;
+  S.cdc.forEach((b, i) => {
+    const h = Math.round(L.CDC_MIN_H + (b.diff - mn) / range * (L.CDC_MAX_H - L.CDC_MIN_H));
+    const x = X0 + i * SLOT + (SLOT - BARW) / 2;
+    const y = b.bull ? L.CDC_BASE_Y - h : L.CDC_BASE_Y;
+    ctx.fillStyle = b.bull ? THEME.green : THEME.red;
+    ctx.fillRect(x, y, BARW, h);
+    if (i === S.cdc.length - 1) { ctx.strokeStyle = THEME.text; ctx.lineWidth = 1; ctx.strokeRect(x - 1, y - 1, BARW + 2, h + 2); }
+  });
+}
+
+function drawFees() {
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.FEES_Y_TOP, 320, L.FEES_Y_H);
+  const stale = !S.feesOkMs || Date.now() - S.feesOkMs > CONFIG.FEES_STALE_MS;
+  const names = ['No', 'Low', 'Med', 'High'];
+  const vals = [S.fees.no, S.fees.low, S.fees.med, S.fees.high];
+  const parts = [];
+  names.forEach((n, i) => {
+    parts.push({ t: (i ? '   ' : '') + n + ' ', c: THEME.dim, bold: false });
+    parts.push({ t: fmtFee(vals[i]), c: stale ? THEME.dim : THEME.orange, bold: true });
+  });
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  let total = 0;
+  for (const p of parts) { ctx.font = p.bold ? 'bold 15px sans-serif' : '13px sans-serif'; total += ctx.measureText(p.t).width; }
+  let x = (320 - total) / 2;
+  const y = L.FEES_Y_TOP + L.FEES_Y_H / 2 + 4;
+  for (const p of parts) { ctx.font = p.bold ? 'bold 15px sans-serif' : '13px sans-serif'; ctx.fillStyle = p.c; ctx.fillText(p.t, x, y); x += ctx.measureText(p.t).width; }
+}
+
+function render() {
+  drawStatus(); drawPrice(); drawSub(); drawCDC(); drawFees();
+  updateNetState();
+  updateBacklight();
+  updateHud();
+}
+
+// ── NET STATE / LED — mirrors updateNetState() in main.cpp ─
+function updateNetState() {
+  if (SIM.offline) S.netState = 2;
+  else if (S.priceOkMs && Date.now() - S.priceOkMs < CONFIG.PRICE_STALE_MS) S.netState = 1;
+  else S.netState = 0;
+  document.getElementById('led').classList.toggle('on', S.netState === 2);
+}
+
+// ── BACKLIGHT — mirrors updateBacklight() in main.cpp ────
+let blMode = 0; // 0 auto, 1..3 fixed
+function computeBacklightDuty() {
+  if (blMode === 0) {
+    const raw = Number(document.getElementById('ldr').value);
+    let dark = (raw - CONFIG.LDR_BRIGHT_RAW) / (CONFIG.LDR_DARK_RAW - CONFIG.LDR_BRIGHT_RAW);
+    dark = Math.max(0, Math.min(1, dark));
+    return CONFIG.BL_MIN_DUTY + Math.round((1 - dark) * (255 - CONFIG.BL_MIN_DUTY));
+  }
+  return blMode === 1 ? 255 : blMode === 2 ? 140 : 64;
+}
+function updateBacklight() {
+  const duty = computeBacklightDuty();
+  document.getElementById('dimOverlay').style.opacity = (1 - duty / 255).toFixed(2);
+}
+document.getElementById('screen').addEventListener('click', () => {
+  blMode = (blMode + 1) % 4;
+  log(`tap -> backlight mode ${blMode === 0 ? 'auto' : blMode}`);
+});
+document.getElementById('tapBtn').addEventListener('click', () => document.getElementById('screen').dispatchEvent(new Event('click')));
+document.getElementById('ldr').addEventListener('input', e => document.getElementById('ldrVal').textContent = e.target.value);
+
+// ── FNG staleness scales with the demo-speed toggle so you can actually
+// see the dim-on-stale behavior without waiting a real 3+ hours
+function fngStaleMs() {
+  return 3 * (document.getElementById('demoHourly').checked ? 20000 : CONFIG.FNG_INTERVAL_MS);
+}
+function cdcStaleMs() {
+  return 3 * (document.getElementById('demoHourly').checked ? 20000 : CONFIG.CDC_INTERVAL_MS);
+}
+
+// ── SIM / NETWORK ─────────────────────────────────────────
+const SIM = { offline: false };
+document.getElementById('simOffline').addEventListener('change', e => SIM.offline = e.target.checked);
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function fetchWithTimeout(url, ms = 8000) {
+  if (SIM.offline) { await sleep(300); throw new Error('simulated offline'); }
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
+}
+
+function calcEMA(closes, period) {
+  const k = 2 / (period + 1);
+  const out = new Array(closes.length).fill(null);
+  let seed = 0;
+  for (let i = 0; i < period; i++) seed += closes[i];
+  out[period - 1] = seed / period;
+  for (let i = period; i < closes.length; i++) out[i] = closes[i] * k + out[i - 1] * (1 - k);
+  return out;
+}
+
+// each job mirrors src/net/*.cpp exactly (same endpoint, same field indices)
+async function jobPrice() {
+  try {
+    const res = await fetchWithTimeout(CONFIG.PRICE_URL);
+    const d = await res.json();
+    const price = parseFloat(d.lastPrice);
+    const change = parseFloat(d.priceChangePercent);
+    if (!(price > 0)) throw new Error('bad price field');
+    S.price = price;
+    if (!isNaN(change)) S.changePct = change;
+    S.priceOkMs = Date.now();
+    log(`price ok: $${price.toFixed(2)} (${change >= 0 ? '+' : ''}${change.toFixed(2)}%)`);
+    return true;
+  } catch (e) { log('price failed: ' + e.message, true); return false; }
+}
+
+async function jobFees() {
+  try {
+    const res = await fetchWithTimeout(CONFIG.FEES_URL);
+    const blocks = await res.json();
+    if (!Array.isArray(blocks) || !blocks.length) throw new Error('empty blocks');
+    const n = blocks.length;
+    const med = i => blocks[Math.min(i, n - 1)].medianFee;
+    S.fees = { high: med(0), med: med(2), low: med(5), no: med(n - 1) };
+    S.feesOkMs = Date.now();
+    log(`fees ok: no=${fmtFee(S.fees.no)} low=${fmtFee(S.fees.low)} med=${fmtFee(S.fees.med)} high=${fmtFee(S.fees.high)}`);
+    return true;
+  } catch (e) { log('fees failed: ' + e.message, true); return false; }
+}
+
+async function jobFng() {
+  try {
+    const res = await fetchWithTimeout(CONFIG.FNG_URL);
+    const d = await res.json();
+    const v = parseInt(d.data[0].value, 10);
+    if (!(v >= 0 && v <= 100)) throw new Error('bad value field');
+    S.fng = v;
+    S.fngOkMs = Date.now();
+    log('fng ok: ' + v);
+    return true;
+  } catch (e) { log('fng failed: ' + e.message, true); return false; }
+}
+
+async function jobCdc() {
+  try {
+    const res = await fetchWithTimeout(CONFIG.KLINES_URL);
+    const arr = await res.json();
+    const closes = arr.map(c => parseFloat(c[4]));
+    if (closes.length < 30 + 26) throw new Error('not enough candles');
+    const ema12 = calcEMA(closes, 12), ema26 = calcEMA(closes, 26);
+    const blocks = [];
+    for (let i = closes.length - 30; i < closes.length; i++)
+      blocks.push({ bull: ema12[i] > ema26[i], diff: Math.abs(ema12[i] - ema26[i]) });
+    S.cdc = blocks; S.cdcValid = true; S.cdcOkMs = Date.now();
+    log(`cdc ok: ${blocks.filter(b => b.bull).length}/30 bullish`);
+    return true;
+  } catch (e) { log('cdc failed: ' + e.message, true); return false; }
+}
+
+// ── JOB SCHEDULER — mirrors the Job struct + serviceJobs() in main.cpp ─
+const JOB_FNS = { price: jobPrice, fees: jobFees, fng: jobFng, cdc: jobCdc };
+function intervalFor(name) {
+  const demo = document.getElementById('demoHourly').checked;
+  if (name === 'fng') return demo ? 20000 : CONFIG.FNG_INTERVAL_MS;
+  if (name === 'cdc') return demo ? 20000 : CONFIG.CDC_INTERVAL_MS;
+  return name === 'price' ? CONFIG.PRICE_INTERVAL_MS : CONFIG.FEES_INTERVAL_MS;
+}
+const jobs = Object.keys(JOB_FNS).map(name => ({ name, next: 0, backoff: CONFIG.RETRY_BASE_MS }));
+
+let jobRunning = false;
+async function serviceJobs() {
+  if (!document.getElementById('autoPoll').checked || jobRunning) return;
+  const now = Date.now();
+  for (const j of jobs) {
+    if (now < j.next) continue;
+    jobRunning = true;
+    const ok = await JOB_FNS[j.name]();
+    if (ok) { j.backoff = CONFIG.RETRY_BASE_MS; j.next = Date.now() + intervalFor(j.name); }
+    else {
+      j.next = Date.now() + j.backoff;
+      log(`${j.name} retry in ${(j.backoff / 1000).toFixed(0)}s`);
+      j.backoff = Math.min(j.backoff * 2, CONFIG.RETRY_MAX_MS);
+    }
+    jobRunning = false;
+    break; // at most one due job per pass, same as the firmware
+  }
+}
+setInterval(serviceJobs, 500);
+
+document.querySelectorAll('[data-fetch]').forEach(btn => btn.addEventListener('click', async () => {
+  const name = btn.dataset.fetch;
+  const j = jobs.find(x => x.name === name);
+  const ok = await JOB_FNS[name]();
+  j.backoff = ok ? CONFIG.RETRY_BASE_MS : Math.min(j.backoff * 2, CONFIG.RETRY_MAX_MS);
+  j.next = Date.now() + (ok ? intervalFor(name) : j.backoff);
+}));
+document.getElementById('fetchAll').addEventListener('click', () => Object.keys(JOB_FNS).forEach(n => document.querySelector(`[data-fetch=${n}]`).click()));
+
+// ── MANUAL OVERRIDES ──────────────────────────────────────
+document.querySelector('[data-apply=price]').addEventListener('click', () => {
+  S.price = parseFloat(document.getElementById('ovPrice').value) || 0;
+  S.changePct = parseFloat(document.getElementById('ovChange').value);
+  S.priceOkMs = Date.now();
+  log('manual price/change applied');
+});
+document.querySelector('[data-apply=fees]').addEventListener('click', () => {
+  S.fees = {
+    no: parseFloat(document.getElementById('ovNo').value),
+    low: parseFloat(document.getElementById('ovLow').value),
+    med: parseFloat(document.getElementById('ovMed').value),
+    high: parseFloat(document.getElementById('ovHigh').value),
+  };
+  S.feesOkMs = Date.now();
+  log('manual fees applied');
+});
+document.querySelector('[data-apply=fng]').addEventListener('click', () => {
+  S.fng = Number(document.getElementById('ovFng').value);
+  S.fngOkMs = Date.now();
+  log('manual F&G applied: ' + S.fng);
+});
+document.getElementById('ovFng').addEventListener('input', e => document.getElementById('ovFngVal').textContent = e.target.value);
+
+function makeCdcWave(bull) {
+  const arr = [];
+  for (let i = 0; i < 30; i++) {
+    const t = i / 29;
+    arr.push({ bull: bull ? i > 3 : i < 26, diff: 500 + Math.abs(Math.sin(t * Math.PI * 1.3)) * 3000 });
+  }
+  return arr;
+}
+function makeCdcZigzag() {
+  const arr = [];
+  for (let i = 0; i < 30; i++) arr.push({ bull: i % 2 === 0, diff: 300 + (i % 7) * 250 });
+  return arr;
+}
+function makeCdcRandom() {
+  const arr = [];
+  for (let i = 0; i < 30; i++) arr.push({ bull: Math.random() > 0.5, diff: 200 + Math.random() * 4000 });
+  return arr;
+}
+document.querySelectorAll('[data-cdc]').forEach(btn => btn.addEventListener('click', () => {
+  const kind = btn.dataset.cdc;
+  S.cdc = kind === 'bull' ? makeCdcWave(true) : kind === 'bear' ? makeCdcWave(false)
+        : kind === 'zigzag' ? makeCdcZigzag() : makeCdcRandom();
+  S.cdcValid = true; S.cdcOkMs = Date.now();
+  log('CDC pattern applied: ' + kind);
+}));
+
+// ── PRESETS ───────────────────────────────────────────────
+const PRESETS = {
+  bull:    { price: 132450.30, changePct: 8.4,   fng: 82, fees: { no: 1.2, low: 3, med: 8, high: 22 }, cdc: () => makeCdcWave(true) },
+  bear:    { price: 71200.10,  changePct: -11.7, fng: 15, fees: { no: 1,   low: 2, med: 4, high: 9 },  cdc: () => makeCdcWave(false) },
+  panic:   { price: 58900.00,  changePct: -19.8, fng: 6,  fees: { no: 3,   low: 12, med: 45, high: 130 }, cdc: () => makeCdcWave(false) },
+  neutral: { price: 98000.00,  changePct: 0.2,   fng: 50, fees: { no: 1,   low: 2, med: 3, high: 5 },  cdc: () => makeCdcZigzag() },
+};
+document.querySelectorAll('[data-preset]').forEach(btn => btn.addEventListener('click', () => {
+  const p = PRESETS[btn.dataset.preset];
+  const now = Date.now();
+  S.price = p.price; S.changePct = p.changePct; S.fng = p.fng; S.fees = { ...p.fees };
+  S.cdc = p.cdc(); S.cdcValid = true;
+  S.priceOkMs = S.feesOkMs = S.fngOkMs = S.cdcOkMs = now;
+  log('preset applied: ' + btn.dataset.preset);
+}));
+
+// ── RESTART / CACHE — mirrors NVS cacheLoad()/cacheSave() ─
+const CACHE_KEY = 'cyd_sim_cache_v1';
+function cacheLoad() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) Object.assign(S, JSON.parse(raw));
+  } catch {}
+}
+function cacheSave() {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(S)); } catch {}
+}
+setInterval(cacheSave, 5000); // simulator: cheap to save often, unlike real flash wear
+
+document.getElementById('restartBtn').addEventListener('click', () => {
+  log('--- simulated daily restart (reload from cache) ---');
+  Object.assign(S, defaultState());
+  cacheLoad();
+  jobs.forEach(j => { j.next = 0; j.backoff = CONFIG.RETRY_BASE_MS; });
+  blMode = 0;
+});
+document.getElementById('resetCacheBtn').addEventListener('click', () => {
+  localStorage.removeItem(CACHE_KEY);
+  Object.assign(S, defaultState());
+  log('cache reset');
+});
+
+// ── LOG / HUD ─────────────────────────────────────────────
+function log(msg, isErr) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if (isErr) line.className = 'err';
+  const t = new Date().toLocaleTimeString();
+  line.textContent = `[${t}] ${msg}`;
+  el.appendChild(line);
+  while (el.children.length > 200) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function ago(ms) { return ms ? ((Date.now() - ms) / 1000).toFixed(0) + 's ago' : 'never'; }
+function updateHud() {
+  document.getElementById('hud').innerHTML = `
+    <b>net:</b> ${['connecting', 'live', 'reconnecting'][S.netState]} &nbsp;
+    <b>backlight:</b> ${blMode === 0 ? 'auto' : ['', '100%', '55%', '25%'][blMode]} (${computeBacklightDuty()}/255)<br>
+    <b>price:</b> ${ago(S.priceOkMs)} — next in ${Math.max(0, Math.round((jobs[0].next - Date.now()) / 1000))}s<br>
+    <b>fees:</b> ${ago(S.feesOkMs)} — next in ${Math.max(0, Math.round((jobs[1].next - Date.now()) / 1000))}s<br>
+    <b>F&amp;G:</b> ${ago(S.fngOkMs)} — next in ${Math.max(0, Math.round((jobs[2].next - Date.now()) / 1000))}s<br>
+    <b>CDC:</b> ${ago(S.cdcOkMs)} — next in ${Math.max(0, Math.round((jobs[3].next - Date.now()) / 1000))}s`;
+}
+document.getElementById('clearLog').addEventListener('click', () => document.getElementById('log').innerHTML = '');
+
+// ── INIT ──────────────────────────────────────────────────
+cacheLoad();
+log('simulator ready — click "Fetch all now" or apply a preset');
+setInterval(render, 200);
+render();
+</script>
+</body>
+</html>
