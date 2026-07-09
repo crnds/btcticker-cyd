@@ -246,15 +246,53 @@ static void drawFees() {
   drawSegs(segs, n, FEES_Y_TOP + 6);
 }
 
+static void drawOffline() {
+  // Draw warning triangle
+  tft.fillTriangle(160, 55, 132, 107, 188, 107, C_ORANGE);
+  tft.fillRect(158, 70, 4, 22, C_BG);
+  tft.fillCircle(160, 99, 2, C_BG);
+
+  // Draw text
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_TEXT, C_BG);
+  tft.setFreeFont(&FreeSansBold12pt7b);
+  tft.drawString("No Wi-Fi Connection", 160, 138);
+
+  tft.setTextColor(C_DIM, C_BG);
+  tft.setFreeFont(&FreeSans9pt7b);
+  tft.drawString("reconnecting to network...", 160, 168);
+  tft.drawString("Setup AP: " AP_PORTAL_NAME, 160, 198);
+}
+
 // ── render ────────────────────────────────────────────────
 void screenRender() {
+  static bool wasOffline = false;
+  static bool offlineDrawn = false;
+
+  bool isOffline = (S.netState == 2);
+  if (isOffline != wasOffline) {
+    screenInvalidate();
+    wasOffline = isOffline;
+    offlineDrawn = false;
+  }
+
   if (needClear) {
     tft.fillScreen(C_BG);
     needClear = false;
   }
+
   drawStatus();
-  drawPrice();
-  drawSub();
-  drawCDC();
-  drawFees();
+
+  if (isOffline) {
+    if (!offlineDrawn) {
+      tft.fillRect(0, 24, 320, 216, C_BG);
+      drawOffline();
+      offlineDrawn = true;
+    }
+  } else {
+    drawPrice();
+    drawSub();
+    drawCDC();
+    drawFees();
+  }
 }

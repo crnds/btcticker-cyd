@@ -303,8 +303,68 @@ function drawFees() {
   for (const p of parts) { ctx.font = p.bold ? 'bold 15px sans-serif' : '13px sans-serif'; ctx.fillStyle = p.c; ctx.fillText(p.t, x, y); x += ctx.measureText(p.t).width; }
 }
 
+function drawOffline() {
+  ctx.fillStyle = THEME.bg;
+  ctx.fillRect(0, 24, 320, 216);
+
+  // Draw warning triangle
+  ctx.beginPath();
+  ctx.moveTo(160, 55);
+  ctx.lineTo(188, 107);
+  ctx.lineTo(132, 107);
+  ctx.closePath();
+  ctx.fillStyle = THEME.orange;
+  ctx.fill();
+
+  // Draw exclamation mark inside triangle
+  ctx.fillStyle = THEME.bg;
+  ctx.fillRect(158, 70, 4, 22);
+  ctx.beginPath();
+  ctx.arc(160, 99, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Draw text
+  ctx.fillStyle = THEME.text;
+  ctx.font = 'bold 15px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('No Wi-Fi Connection', 160, 138);
+
+  ctx.fillStyle = THEME.dim;
+  ctx.font = '13px sans-serif';
+  ctx.fillText('reconnecting to network...', 160, 168);
+  ctx.fillText('Setup AP: BTC-Ticker', 160, 198);
+}
+
+let wasOffline = false;
+let offlineDrawn = false;
+let needClear = true;
+
 function render() {
-  drawStatus(); drawPrice(); drawSub(); drawCDC(); drawFees();
+  const isOffline = (S.netState === 2);
+  if (isOffline !== wasOffline) {
+    wasOffline = isOffline;
+    offlineDrawn = false;
+    needClear = true;
+  }
+
+  if (needClear) {
+    ctx.fillStyle = THEME.bg;
+    ctx.fillRect(0, 0, 320, 240);
+    needClear = false;
+  }
+
+  drawStatus();
+
+  if (isOffline) {
+    if (!offlineDrawn) {
+      drawOffline();
+      offlineDrawn = true;
+    }
+  } else {
+    drawPrice(); drawSub(); drawCDC(); drawFees();
+  }
+
   updateNetState();
   updateBacklight();
   updateHud();
