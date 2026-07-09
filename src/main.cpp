@@ -148,6 +148,19 @@ static void maybeDailyRestart() {
   }
 }
 
+// approximates CPU load as the fraction of each loop() spent doing work vs.
+// blocked in delay() — not a true kernel/idle-task CPU metric (FreeRTOS
+// runtime stats aren't enabled), but a reasonable "is the board busy" proxy.
+// Note a blocking HTTP fetch will show as high "CPU" too, since the loop
+// can't do anything else while waiting on the network.
+static void updateCpuLoad(uint32_t loopStartUs, uint32_t loopDelayMs) {
+  static float smooth = 0;
+  uint32_t workUs = micros() - loopStartUs;
+  float busyPct = 100.0f * workUs / (workUs + loopDelayMs * 1000UL);
+  smooth += (busyPct - smooth) * 0.1f;
+  S.cpuPct = (uint8_t)(smooth + 0.5f);
+}
+
 // ── setup / loop ──────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -183,6 +196,7 @@ void setup() {
 }
 
 void loop() {
+  uint32_t t0 = micros();
   updateNetState();
   serviceJobs();
   handleTouch();
@@ -190,5 +204,7 @@ void loop() {
   maybeSaveCache();
   maybeDailyRestart();
   screenRender();
-  delay(25);
+  const uint32_t LOOP_DELAY_MS = 25;
+  updateCpuLoad(t0, LOOP_DELAY_MS);
+  delay(LOOP_DELAY_MS);
 }

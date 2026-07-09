@@ -3,24 +3,26 @@
 #include "state.h"
 #include "config.h"
 #include <TFT_eSPI.h>
+#include "fonts/PriceFont.h"
 
 TFT_eSPI tft;
 
 // ── layout (320x240 landscape) ────────────────────────────
 //   0.. 23  status row: connection dot + label, exchange name
-//  26.. 81  price integer part (FreeSansBold 24pt, centered)
-//  84..111  sub row: decimals · F&G value · 24h change
+//  26..113  price row: big price (custom PriceFont) on the left, F&G
+//           stacked above 24h change in a right-hand column
 // 116..196  CDC strip: 30 bars around a midline at y=156
 // 204..236  fee row: No/Low/Med/High
-#define PRICE_Y_TOP 26
-#define PRICE_Y_H   56
-#define SUB_Y_TOP   84
-#define SUB_Y_H     28
-#define CDC_BASE_Y  156
-#define CDC_MAX_H   38
-#define CDC_MIN_H   3
-#define FEES_Y_TOP  204
-#define FEES_Y_H    32
+#define PRICE_Y_TOP  26
+#define PRICE_Y_H    88
+#define PRICE_LEFT_PAD 6
+#define SIDE_COL_X0  260   // left edge of the reserved F&G/change column
+#define SIDE_COL_W   (320 - SIDE_COL_X0)
+#define CDC_BASE_Y   156
+#define CDC_MAX_H    38
+#define CDC_MIN_H    3
+#define FEES_Y_TOP   204
+#define FEES_Y_H     32
 
 // last-drawn signatures — a draw happens only when its signature changes
 static String   sigStatus, sigPrice, sigSub, sigFees;
@@ -114,7 +116,17 @@ static String fmtFee(float v) {
 
 // ── sections ──────────────────────────────────────────────
 static void drawStatus() {
-  String sig = String(S.netState);
+  uint32_t heapTotal = ESP.getHeapSize();
+  uint32_t heapFree  = ESP.getFreeHeap();
+  int ramPct = heapTotal ? (int)(100UL * (heapTotal - heapFree) / heapTotal) : 0;
+
+  uint32_t sketchUsed = ESP.getSketchSize();
+  uint32_t sketchFree = ESP.getFreeSketchSpace();
+  int flashPct = (sketchUsed + sketchFree) ?
+      (int)(100UL * sketchUsed / (sketchUsed + sketchFree)) : 0;
+
+  String sig = String(S.netState) + "/" + String(S.cpuPct) + "/" +
+               String(ramPct) + "/" + String(flashPct);
   if (sig == sigStatus) return;
   sigStatus = sig;
 
@@ -126,10 +138,20 @@ static void drawStatus() {
   tft.setTextColor(C_DIM, C_BG);
   tft.setTextDatum(ML_DATUM);
   tft.drawString(LABELS[S.netState], 26, 13);
+
+  // classic 6px/char font — three metrics don't fit the smooth 9pt font
+  // in this row's width, so the debug readout gets its own compact style
+  char dbg[40];
+  snprintf(dbg, sizeof(dbg), "[ CPU %d%% | RAM %d%% | Flash %d%% ]",
+           S.cpuPct, ramPct, flashPct);
+  tft.setTextFont(1);
   tft.setTextDatum(MR_DATUM);
-  tft.drawString("Binance", 310, 13);
+  tft.drawString(dbg, 316, 13);
 }
 
+// PriceFont (custom, ~66px digits) is used whenever it fits the space left
+// of the F&G/change column; falls back to the 24pt bundled font for the
+// rare case of a wider string (e.g. a 7-digit price) so it never overflows
 static void drawPrice() {
   bool stale = S.priceOkMs == 0 || millis() - S.priceOkMs > PRICE_STALE_MS;
   String txt = S.price > 0 ? fmtThousands((uint32_t)S.price) : "-----";
@@ -137,41 +159,43 @@ static void drawPrice() {
   if (sig == sigPrice) return;
   sigPrice = sig;
 
-  tft.fillRect(0, PRICE_Y_TOP, 320, PRICE_Y_H, C_BG);
-  tft.setFreeFont(&FreeSansBold24pt7b);
-  tft.setTextDatum(MC_DATUM);
+  tft.fillRect(0, PRICE_Y_TOP, SIDE_COL_X0, PRICE_Y_H, C_BG);
+  int maxW = SIDE_COL_X0 - 2 * PRICE_LEFT_PAD;
+  tft.setFreeFont(&PriceFont);
+  if (tft.textWidth(txt) > maxW) tft.setFreeFont(&FreeSansBold24pt7b);
+  tft.setTextDatum(ML_DATUM);
   tft.setTextColor(stale ? C_DIM : C_TEXT, C_BG);
-  tft.drawString(txt, 160, PRICE_Y_TOP + PRICE_Y_H / 2);
+  tft.drawString(txt, PRICE_LEFT_PAD, PRICE_Y_TOP + PRICE_Y_H / 2);
 }
 
+// F&G stacked above the 24h change, right-aligned in their own column
 static void drawSub() {
-  bool priceStale = S.priceOkMs == 0 || millis() - S.priceOkMs > PRICE_STALE_MS;
-  bool fngStale   = S.fngOkMs == 0 || millis() - S.fngOkMs > FNG_STALE_MS;
+  bool fngStale = S.fngOkMs == 0 || millis() - S.fngOkMs > FNG_STALE_MS;
 
-  Seg segs[3];
-  int n = 0;
-  if (S.price > 0) {
-    char d[8];
-    snprintf(d, sizeof(d), ".%02d", (int)(lround((double)S.price * 100) % 100));
-    segs[n++] = {String(d), priceStale ? C_DIM : C_DEC, &FreeSansBold12pt7b};
-  }
-  if (S.fng >= 0) {
-    segs[n++] = {"   " + String(S.fng), fngStale ? C_DIM : fngColor(S.fng),
-                 &FreeSansBold12pt7b};
-  }
+  String fngTxt = S.fng >= 0 ? String(S.fng) : "";
+  String chgTxt;
   if (!isnan(S.changePct)) {
     char c[8];
     snprintf(c, sizeof(c), "%+d%%", (int)lroundf(S.changePct));
-    segs[n++] = {"   " + String(c), S.changePct >= 0 ? C_GREEN : C_RED,
-                 &FreeSansBold12pt7b};
+    chgTxt = c;
   }
 
-  String sig = segSignature(segs, n);
+  String sig = fngTxt + (fngStale ? "|s" : "") + "/" + chgTxt;
   if (sig == sigSub) return;
   sigSub = sig;
 
-  tft.fillRect(0, SUB_Y_TOP, 320, SUB_Y_H, C_BG);
-  if (n) drawSegs(segs, n, SUB_Y_TOP + 2);
+  tft.fillRect(SIDE_COL_X0, PRICE_Y_TOP, SIDE_COL_W, PRICE_Y_H, C_BG);
+  tft.setFreeFont(&FreeSansBold12pt7b);
+  tft.setTextDatum(MR_DATUM);
+  int x = 320 - 4;
+  if (fngTxt.length()) {
+    tft.setTextColor(fngStale ? C_DIM : fngColor(S.fng), C_BG);
+    tft.drawString(fngTxt, x, PRICE_Y_TOP + 26);
+  }
+  if (chgTxt.length()) {
+    tft.setTextColor(S.changePct >= 0 ? C_GREEN : C_RED, C_BG);
+    tft.drawString(chgTxt, x, PRICE_Y_TOP + 62);
+  }
 }
 
 static void drawCDC() {

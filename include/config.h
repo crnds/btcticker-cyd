@@ -22,7 +22,7 @@
 #define FNG_URL    "https://api.alternative.me/fng/?limit=1"
 
 // ── Cadences / retry ─────────────────────────────────────
-#define PRICE_INTERVAL_MS  10000UL
+#define PRICE_INTERVAL_MS  1000UL
 #define FEES_INTERVAL_MS   60000UL
 #define FNG_INTERVAL_MS    3600000UL
 #define CDC_INTERVAL_MS    3600000UL

@@ -27,6 +27,7 @@ struct TickerState {
   uint32_t cdcVersion = 0;    // bumped on new data so the UI knows to repaint
   uint32_t cdcOkMs    = 0;
   uint8_t  netState   = 0;    // 0 connecting, 1 live, 2 reconnecting
+  uint8_t  cpuPct     = 0;    // main-loop busy time, smoothed (see updateCpuLoad())
 };
 
 extern TickerState S;

@@ -20,8 +20,6 @@
   .screen-wrap { position: relative; border: 3px solid #222; border-radius: 4px; overflow: hidden; }
   canvas { display: block; cursor: pointer; }
   .dim-overlay { position: absolute; inset: 0; background: #000; pointer-events: none; }
-  .led { position: absolute; top: 8px; right: 14px; width: 8px; height: 8px; border-radius: 50%; background: #300; }
-  .led.on { background: #f22; box-shadow: 0 0 6px #f22; }
   .hint { text-align: center; font-size: 10px; color: #7a6a10; margin-top: 8px; }
 
   .panel { flex: 1 1 420px; min-width: 380px; max-width: 560px; }
@@ -59,9 +57,8 @@
 <div class="device">
   <div class="brand">CYD · ESP32-2432S028R</div>
   <div class="screen-wrap">
-    <canvas id="screen" width="640" height="480"></canvas>
+    <canvas id="screen" width="320" height="240"></canvas>
     <div class="dim-overlay" id="dimOverlay"></div>
-    <div class="led" id="led" title="offline beacon (case RGB LED)"></div>
   </div>
   <div class="hint">click screen = tap (cycle backlight)</div>
 </div>
@@ -166,7 +163,7 @@ const CONFIG = {
   KLINES_URL: 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=100',
   FEES_URL:   'https://mempool.space/api/v1/fees/mempool-blocks',
   FNG_URL:    'https://api.alternative.me/fng/?limit=1',
-  PRICE_INTERVAL_MS: 10000,
+  PRICE_INTERVAL_MS: 1000,
   FEES_INTERVAL_MS:  60000,
   FNG_INTERVAL_MS:   3600000,
   CDC_INTERVAL_MS:   3600000,
@@ -198,17 +195,29 @@ const FNG_COLORS = ['#FF1744', '#FF6D00', '#FFEB3B', '#69F0AE', '#00E676'];
 const fngColor = v => FNG_COLORS[Math.min(Math.floor(v / 20), 4)];
 
 // logical 320x240 coordinate space, same numbers as screen.cpp
-const L = { PRICE_Y_TOP: 26, PRICE_Y_H: 56, SUB_Y_TOP: 84, SUB_Y_H: 28,
+const L = { PRICE_Y_TOP: 26, PRICE_Y_H: 88, PRICE_LEFT_PAD: 6,
+            SIDE_COL_X0: 260, SIDE_COL_W: 320 - 260,
             CDC_BASE_Y: 156, CDC_MAX_H: 38, CDC_MIN_H: 3,
             FEES_Y_TOP: 204, FEES_Y_H: 32 };
 
 const cvs = document.getElementById('screen');
 const ctx = cvs.getContext('2d');
-const SCALE = 2;
-ctx.scale(SCALE, SCALE);
+// backing store is exactly 320x240 — the board's real resolution, no scale-up
 
 const fmtThousands = v => Math.round(v).toLocaleString('en-US');
 const fmtFee = v => (v == null || isNaN(v)) ? '-' : (v >= 1 ? String(Math.round(v)) : v.toFixed(1));
+
+// a browser tab has no real CPU/heap/flash telemetry like ESP.getFreeHeap()/
+// getSketchSize() in screen.cpp, so these gently random-walk just to preview
+// the [ CPU n% | RAM n% | Flash n% ] readout's layout. Flash barely moves —
+// on the real board it only changes when a new firmware image is flashed.
+let simCpu = 8, simRam = 34, simFlash = 36;
+function updateSimStats() {
+  simCpu = Math.max(2, Math.min(95, simCpu + (Math.random() - 0.5) * 6));
+  simRam = Math.max(20, Math.min(70, simRam + (Math.random() - 0.5) * 2));
+  simFlash = Math.max(30, Math.min(40, simFlash + (Math.random() - 0.5) * 0.2));
+}
+setInterval(updateSimStats, 800);
 
 function drawStatus() {
   ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, 320, 24);
@@ -216,40 +225,46 @@ function drawStatus() {
   ctx.beginPath(); ctx.fillStyle = dot; ctx.arc(14, 12, 5, 0, Math.PI * 2); ctx.fill();
   ctx.font = '13px sans-serif'; ctx.fillStyle = THEME.dim; ctx.textBaseline = 'middle';
   const labels = ['connecting...', 'live', 'reconnecting...'];
-  ctx.textAlign = 'left';  ctx.fillText(labels[S.netState], 26, 13);
-  ctx.textAlign = 'right'; ctx.fillText('Binance', 310, 13);
+  ctx.textAlign = 'left'; ctx.fillText(labels[S.netState], 26, 13);
+  ctx.textAlign = 'right';
+  // firmware switches this readout to the classic 6px/char font so three
+  // metrics fit; canvas has no equivalent, so a small monospace stands in
+  ctx.font = '11px ui-monospace, Menlo, monospace';
+  ctx.fillText(`[ CPU ${Math.round(simCpu)}% | RAM ${Math.round(simRam)}% | Flash ${Math.round(simFlash)}% ]`, 316, 13);
 }
 
+// mirrors the firmware's PriceFont (a custom ~66px digit font): use the
+// big size whenever it fits the space left of the F&G/change column,
+// falling back to the smaller 24pt-equivalent size otherwise
 function drawPrice() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, 320, L.PRICE_Y_H);
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, L.SIDE_COL_X0, L.PRICE_Y_H);
   const stale = !S.priceOkMs || Date.now() - S.priceOkMs > CONFIG.PRICE_STALE_MS;
   const txt = S.price > 0 ? fmtThousands(S.price) : '-----';
-  ctx.font = 'bold 40px sans-serif';
+  const maxW = L.SIDE_COL_X0 - 2 * L.PRICE_LEFT_PAD;
+  ctx.font = 'bold 66px sans-serif';
+  const big = ctx.measureText(txt).width <= maxW;
+  ctx.font = big ? 'bold 66px sans-serif' : 'bold 40px sans-serif';
   ctx.fillStyle = stale ? THEME.dim : THEME.text;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(txt, 160, L.PRICE_Y_TOP + L.PRICE_Y_H / 2);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, L.PRICE_LEFT_PAD, L.PRICE_Y_TOP + L.PRICE_Y_H / 2);
 }
 
+// F&G stacked above the 24h change, right-aligned in their own column
 function drawSub() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.SUB_Y_TOP, 320, L.SUB_Y_H);
-  const priceStale = !S.priceOkMs || Date.now() - S.priceOkMs > CONFIG.PRICE_STALE_MS;
-  const fngStale   = !S.fngOkMs   || Date.now() - S.fngOkMs   > fngStaleMs();
-  const segs = [];
-  if (S.price > 0) {
-    const dec = String(Math.round((S.price * 100) % 100)).padStart(2, '0');
-    segs.push({ t: '.' + dec, c: priceStale ? THEME.dim : THEME.dec });
+  ctx.fillStyle = THEME.bg; ctx.fillRect(L.SIDE_COL_X0, L.PRICE_Y_TOP, L.SIDE_COL_W, L.PRICE_Y_H);
+  const fngStale = !S.fngOkMs || Date.now() - S.fngOkMs > fngStaleMs();
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  const x = 320 - 4;
+  if (S.fng >= 0) {
+    ctx.fillStyle = fngStale ? THEME.dim : fngColor(S.fng);
+    ctx.fillText(String(S.fng), x, L.PRICE_Y_TOP + 26);
   }
-  if (S.fng >= 0) segs.push({ t: '   ' + S.fng, c: fngStale ? THEME.dim : fngColor(S.fng) });
   if (!isNaN(S.changePct)) {
     const c = (S.changePct >= 0 ? '+' : '') + Math.round(S.changePct) + '%';
-    segs.push({ t: '   ' + c, c: S.changePct >= 0 ? THEME.green : THEME.red });
+    ctx.fillStyle = S.changePct >= 0 ? THEME.green : THEME.red;
+    ctx.fillText(c, x, L.PRICE_Y_TOP + 62);
   }
-  ctx.font = 'bold 20px sans-serif';
-  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  const total = segs.reduce((w, s) => w + ctx.measureText(s.t).width, 0);
-  let x = (320 - total) / 2;
-  const y = L.SUB_Y_TOP + L.SUB_Y_H / 2 + 2;
-  for (const s of segs) { ctx.fillStyle = s.c; ctx.fillText(s.t, x, y); x += ctx.measureText(s.t).width; }
 }
 
 function drawCDC() {
@@ -295,12 +310,14 @@ function render() {
   updateHud();
 }
 
-// ── NET STATE / LED — mirrors updateNetState() in main.cpp ─
+// ── NET STATE — mirrors updateNetState() in main.cpp ─────
+// (the board's physical case RGB LED also lights red when offline; the
+// on-screen status dot in drawStatus() is the only representation of that
+// here, since a separate on-canvas overlay collided with the debug readout)
 function updateNetState() {
   if (SIM.offline) S.netState = 2;
   else if (S.priceOkMs && Date.now() - S.priceOkMs < CONFIG.PRICE_STALE_MS) S.netState = 1;
   else S.netState = 0;
-  document.getElementById('led').classList.toggle('on', S.netState === 2);
 }
 
 // ── BACKLIGHT — mirrors updateBacklight() in main.cpp ────
@@ -573,6 +590,12 @@ function updateHud() {
 document.getElementById('clearLog').addEventListener('click', () => document.getElementById('log').innerHTML = '');
 
 // ── INIT ──────────────────────────────────────────────────
+// canvas starts fully transparent; mirror the firmware's one-time
+// tft.fillScreen(C_BG) at boot so the few-px gaps between sections don't
+// let the device bezel's yellow show through as thin lines
+ctx.fillStyle = THEME.bg;
+ctx.fillRect(0, 0, 320, 240);
+
 cacheLoad();
 log('simulator ready — click "Fetch all now" or apply a preset');
 setInterval(render, 200);

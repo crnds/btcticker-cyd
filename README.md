@@ -5,7 +5,7 @@ Standalone BTC ticker firmware for the **CYD "Cheap Yellow Display"**
 A hardware port of the four crucial metrics from the
 [btcticker](../btcticker) web app:
 
-1. **BTC price + 24h % change** — Binance REST, 10 s poll
+1. **BTC price + 24h % change** — Binance REST, 1 s poll
 2. **Mempool fees** (No / Low / Med / High priority, sat/vB) — mempool.space, 60 s
 3. **Fear & Greed index** — alternative.me (keyless), hourly
 4. **CDC Action Zone strip** — 30 days of EMA12/EMA26 bull/bear blocks
