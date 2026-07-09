@@ -9,7 +9,8 @@
 // The full payload is ~25 KB; buffering it in a JSON document would hold every
 // candle's strings in RAM, so instead extract field 4 (close) of each candle
 // straight off the TLS stream with a bracket-depth scanner.
-static int parseCloses(Stream& s, float* closes) {
+static int parseCloses(HTTPClient& http, float* closes) {
+  Stream& s = http.getStream();
   int  depth = 0, field = 0, n = 0;
   bool inStr = false;
   char buf[24];
@@ -18,7 +19,11 @@ static int parseCloses(Stream& s, float* closes) {
 
   while (millis() - lastByte < HTTP_TIMEOUT_MS) {
     int c = s.read();
-    if (c < 0) { delay(2); continue; }
+    if (c < 0) {
+      if (!http.connected()) break;
+      delay(2);
+      continue;
+    }
     lastByte = millis();
     char ch = (char)c;
 
@@ -64,7 +69,7 @@ bool fetchCDC(CdcBlock* blocks30) {
   if (!httpGet(http, KLINES_URL)) return false;
 
   float closes[MAX_CLOSES];
-  int n = parseCloses(http.getStream(), closes);
+  int n = parseCloses(http, closes);
   http.end();
   if (n < CDC_DAYS + 26) return false;  // 30 blocks + EMA26 warmup
 

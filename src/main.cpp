@@ -71,7 +71,7 @@ static void serviceJobs() {
   if (WiFi.status() != WL_CONNECTED) return;
   uint32_t now = millis();
   for (Job& j : jobs) {
-    if (now < j.next) continue;
+    if ((int32_t)(now - j.next) < 0) continue;
     if (j.run()) {
       j.backoff = RETRY_BASE_MS;
       j.next = now + j.interval;
