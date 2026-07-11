@@ -35,6 +35,16 @@
 #define FEES_STALE_MS      (3 * FEES_INTERVAL_MS)
 #define FNG_STALE_MS       (3 * FNG_INTERVAL_MS)
 
+// status-row diagnostics (CPU/RAM/FLASH) sample + repaint cadence: the
+// values only meaningfully change at ~1 s scale, and ESP.getSketchSize()/
+// getFreeSketchSpace() scan flash for the running partition's end (~300 ms)
+// — paying that every 25 ms loop pass was itself the dominant CPU cost
+#define STATUS_REFRESH_MS  1000UL
+
+// touch poll cadence: the 3-sample bit-bang read costs ~1.5 ms, and 20 Hz
+// is still far faster than any finger tap — no need to pay it every pass
+#define TOUCH_POLL_MS      50UL
+
 // NVS snapshot cadence — mirrors the web app's 5-min localStorage snapshots;
 // keeps flash wear negligible while boot always has a recent value to paint
 #define CACHE_SAVE_MS      (5 * 60000UL)
@@ -42,14 +52,33 @@
 // ── CYD pins (ESP32-2432S028R) ───────────────────────────
 #define PIN_BACKLIGHT  21
 #define PIN_LDR        34   // photoresistor, analog
-#define PIN_TOUCH_IRQ  36   // XPT2046 PENIRQ, LOW while touched
+// XPT2046 sits on its own VSPI bus (not the TFT HSPI) — classic single-USB CYD
+#define PIN_TOUCH_IRQ  36   // PENIRQ, LOW while touched
+#define PIN_TOUCH_CS   33
+#define PIN_TOUCH_CLK  25
+#define PIN_TOUCH_MOSI 32
+#define PIN_TOUCH_MISO 39
 #define PIN_LED_R      4    // RGB LED, active LOW
 #define PIN_LED_G      16
 #define PIN_LED_B      17
 
+// ── Touch calibration (raw ADC → 320×240 landscape) ────────
+// Idle pressure on this unit sits ~40–70; a firm tap is usually >200.
+// Tune mins/maxes from the "touch dbg: raw=..." serial lines.
+#define TOUCH_X_MIN    200
+#define TOUCH_X_MAX    3700
+#define TOUCH_Y_MIN    240
+#define TOUCH_Y_MAX    3800
+#define TOUCH_Z_MIN    95    // idle noise sits ~50–80; firm tap is usually 150+
+#define TOUCH_TAP_MS   350   // debounce between taps
+// ADC channel naming vs screen axes (see XPT2046 notes in main.cpp)
+#define TOUCH_SWAP_XY  0
+#define TOUCH_INVERT_X 0
+#define TOUCH_INVERT_Y 0
+
 // ── Backlight ────────────────────────────────────────────
 #define BL_CHANNEL     0
-#define BL_MIN_DUTY    30    // auto-dim floor (0-255)
+#define BL_DUTY        230   // fixed brightness, ~90% of 255 (no tap/LDR control)
 // LDR calibration: raw analogRead in a bright room vs in the dark.
 // The CYD's divider reads LOWER in brighter light; tune on your unit.
 #define LDR_BRIGHT_RAW 300

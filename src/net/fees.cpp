@@ -4,8 +4,9 @@
 #include <ArduinoJson.h>
 
 bool fetchFees(FeeTiers& t) {
+  WiFiClientSecure tls;
   HTTPClient http;
-  if (!httpGet(http, FEES_URL)) return false;
+  if (!httpGet(http, tls, FEES_URL)) return false;
 
   // the response nests a large feeRange array per block — the filter keeps
   // only medianFee, so the parse stays a few hundred bytes regardless
@@ -15,7 +16,10 @@ bool fetchFees(FeeTiers& t) {
   DeserializationError err =
       deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
-  if (err || !doc.is<JsonArray>() || doc.size() == 0) return false;
+  if (err || !doc.is<JsonArray>() || doc.size() == 0) {
+    Serial.printf("fetchFees failed parsing: %s (size %d)\n", err.c_str(), doc.size());
+    return false;
+  }
 
   JsonArray blocks = doc.as<JsonArray>();
   int n = blocks.size();

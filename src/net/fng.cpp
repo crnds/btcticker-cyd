@@ -4,13 +4,17 @@
 #include <ArduinoJson.h>
 
 bool fetchFng(int& value) {
+  WiFiClientSecure tls;
   HTTPClient http;
-  if (!httpGet(http, FNG_URL)) return false;
+  if (!httpGet(http, tls, FNG_URL)) return false;
 
   JsonDocument doc;   // response is ~300 bytes, no filter needed
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) return false;
+  if (err) {
+    Serial.printf("fetchFng failed parsing: %s\n", err.c_str());
+    return false;
+  }
 
   const char* v = doc["data"][0]["value"];
   if (!v) return false;

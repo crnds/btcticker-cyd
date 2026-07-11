@@ -65,13 +65,17 @@ static void calcEMA(const float* c, int n, int period, float* out) {
 }
 
 bool fetchCDC(CdcBlock* blocks30) {
+  WiFiClientSecure tls;
   HTTPClient http;
-  if (!httpGet(http, KLINES_URL)) return false;
+  if (!httpGet(http, tls, KLINES_URL)) return false;
 
   float closes[MAX_CLOSES];
   int n = parseCloses(http, closes);
   http.end();
-  if (n < CDC_DAYS + 26) return false;  // 30 blocks + EMA26 warmup
+  if (n < CDC_DAYS + 26) {
+    Serial.printf("fetchCDC parsed %d, need %d\n", n, CDC_DAYS + 26);
+    return false;  // 30 blocks + EMA26 warmup
+  }
 
   float ema12[MAX_CLOSES], ema26[MAX_CLOSES];
   calcEMA(closes, n, 12, ema12);

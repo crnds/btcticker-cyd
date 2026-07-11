@@ -60,7 +60,7 @@
     <canvas id="screen" width="320" height="240"></canvas>
     <div class="dim-overlay" id="dimOverlay"></div>
   </div>
-  <div class="hint">click screen = tap (cycle backlight)</div>
+  <div class="hint">bottom-right icon = flip 180° (backlight fixed at 90%)</div>
 </div>
 
 <div class="panel">
@@ -133,13 +133,8 @@
   </fieldset>
 
   <fieldset>
-    <legend>Backlight / touch</legend>
-    <div class="row">
-      <label>LDR</label><input type="range" id="ldr" min="0" max="4095" value="2000">
-      <span id="ldrVal">2000</span>
-    </div>
+    <legend>Device</legend>
     <div class="btnrow">
-      <button id="tapBtn">Tap screen (cycle mode)</button>
       <button id="restartBtn">Simulate daily restart</button>
       <button id="resetCacheBtn">Reset cached state</button>
     </div>
@@ -171,7 +166,7 @@ const CONFIG = {
   RETRY_MAX_MS:  60000,
   LDR_BRIGHT_RAW: 300,
   LDR_DARK_RAW:   3800,
-  BL_MIN_DUTY:    30,
+  BL_DUTY:        230,  // fixed brightness, ~90% (no tap/LDR control)
 };
 CONFIG.PRICE_STALE_MS = 3 * CONFIG.PRICE_INTERVAL_MS + 30000;
 CONFIG.FEES_STALE_MS  = 3 * CONFIG.FEES_INTERVAL_MS;
@@ -188,17 +183,35 @@ function defaultState() {
 }
 let S = defaultState();
 
-// ── THEME — mirrors src/ui/theme.h ───────────────────────
-const THEME = { bg: '#000', text: '#E8E8E8', dec: '#BDBDBD', dim: '#9E9E9E',
-                 green: '#00E676', red: '#FF1744', orange: '#F7931A' };
+// ── THEME — mirrors src/ui/theme.h ("instrument panel" palette) ──
+const THEME = { bg: '#07090D', surface: '#151B26', border: '#27303F',
+                text: '#F2F5FA', text2: '#9AA7BD', muted: '#5C6980',
+                dim: '#6E7A8F',
+                green: '#00E17B', red: '#FF3B5F', orange: '#F7931A' };
 const FNG_COLORS = ['#FF1744', '#FF6D00', '#FFEB3B', '#69F0AE', '#00E676'];
 const fngColor = v => FNG_COLORS[Math.min(Math.floor(v / 20), 4)];
 
+// per-channel blend a -> b, t = 0..1 — mirrors lerp565/tint565 in theme.h
+function lerpHex(a, b, t) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const ch = s => [(s >> 16) & 255, (s >> 8) & 255, s & 255];
+  const [ar, ag, ab] = ch(pa), [br, bg, bb] = ch(pb);
+  const c = (x, y) => Math.round(x + (y - x) * t);
+  return `rgb(${c(ar, br)},${c(ag, bg)},${c(ab, bb)})`;
+}
+const tint = c => lerpHex(THEME.bg, c, 56 / 255);
+
 // logical 320x240 coordinate space, same numbers as screen.cpp
-const L = { PRICE_Y_TOP: 26, PRICE_Y_H: 88, PRICE_LEFT_PAD: 6,
-            SIDE_COL_X0: 260, SIDE_COL_W: 320 - 260,
-            CDC_BASE_Y: 156, CDC_MAX_H: 38, CDC_MIN_H: 3,
-            FEES_Y_TOP: 204, FEES_Y_H: 32 };
+const L = { PRICE_Y_TOP: 6, PRICE_Y_H: 104, PRICE_LEFT_PAD: 8,
+            DELTA_Y_TOP: 116, DELTA_H: 22,
+            CDC_ROW_TOP: 144, CDC_ROW_H: 36, CDC_CARD_X: 8, CDC_CARD_W: 304,
+            CDC_BASE_Y: 162, CDC_MAX_H: 13, CDC_MIN_H: 2,
+            FEES_Y_TOP: 186, FEES_Y_H: 30, FEES_X0: 8, CHIP_W: 68, CHIP_GAP: 6,
+            STATUS_Y_TOP: 218, STATUS_H: 22,
+            FLIP_ICON_S: 10, FLIP_ICON_M: 2,
+            get FLIP_ICON_X() { return 320 - this.FLIP_ICON_S - this.FLIP_ICON_M; },
+            get FLIP_ICON_Y() { return this.FLIP_ICON_M; },
+            FLIP_HIT_PAD: 10 };
 
 const cvs = document.getElementById('screen');
 const ctx = cvs.getContext('2d');
@@ -219,126 +232,245 @@ function updateSimStats() {
 }
 setInterval(updateSimStats, 800);
 
-function drawStatus() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, 320, 24);
-  const dot = S.netState === 1 ? THEME.green : S.netState === 0 ? THEME.orange : THEME.red;
-  ctx.beginPath(); ctx.fillStyle = dot; ctx.arc(14, 12, 5, 0, Math.PI * 2); ctx.fill();
-  ctx.font = '13px sans-serif'; ctx.fillStyle = THEME.dim; ctx.textBaseline = 'middle';
-  const labels = ['connecting...', 'live', 'reconnecting...'];
-  ctx.textAlign = 'left'; ctx.fillText(labels[S.netState], 26, 13);
-  ctx.textAlign = 'right';
-  // firmware switches this readout to the classic 6px/char font so three
-  // metrics fit; canvas has no equivalent, so a small monospace stands in
-  ctx.font = '11px ui-monospace, Menlo, monospace';
-  ctx.fillText(`[ CPU ${Math.round(simCpu)}% | RAM ${Math.round(simRam)}% | Flash ${Math.round(simFlash)}% ]`, 316, 13);
+// canvas stand-ins: JetBrains Mono matches the vendored price face when the
+// browser has it; SANS approximates the FreeSansBold labels/pills; micro-cap
+// GLCD labels become small tracked mono
+const MONO = '"JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+const SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif';
+
+// micro-cap label — mirrors drawTracked() (6×8 GLCD glyphs, +1px tracking)
+function microLabel(txt, x, yMid, color, align = 'left') {
+  ctx.font = `9px ${MONO}`;
+  ctx.letterSpacing = '1px';
+  const w = ctx.measureText(txt).width;
+  ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, align === 'left' ? x : x - w, yMid);
+  ctx.letterSpacing = '0px';
+  return w;
 }
 
-// mirrors the firmware's PriceFont (a custom ~66px digit font): use the
-// big size whenever it fits the space left of the F&G/change column,
-// falling back to the smaller 24pt-equivalent size otherwise
+function drawStatus() {
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.STATUS_Y_TOP, 320, L.STATUS_H);
+  const dot = S.netState === 1 ? THEME.green : S.netState === 0 ? THEME.orange : THEME.red;
+  let r = 4;
+  if (S.netState === 1) {
+    r = (Date.now() / 500) % 2 < 1 ? 3 : 5;
+  }
+  ctx.beginPath(); ctx.fillStyle = dot; ctx.arc(14, L.STATUS_Y_TOP + 10, r, 0, Math.PI * 2); ctx.fill();
+  ctx.font = `9px ${MONO}`; ctx.fillStyle = THEME.text2; ctx.textBaseline = 'middle';
+  const label = S.netState === 1 ? 'HomeWiFi' : (S.netState === 2 ? 'offline' : 'connecting...');
+  ctx.textAlign = 'left'; ctx.fillText(label, 26, L.STATUS_Y_TOP + 10);
+  const labelRight = 26 + ctx.measureText(label).width;
+
+  const sCpu = `${Math.round(simCpu)}`;
+  const sRom = `${Math.round(simFlash)}`;
+  const sRam = `${Math.round(simRam)}`;
+
+  if (labelRight + 8 <= 144) {
+    ctx.textBaseline = 'middle';
+    const y = L.STATUS_Y_TOP + 10;
+    ctx.font = `9px ${MONO}`;
+
+    // CPU block
+    ctx.textAlign = 'left';
+    ctx.fillStyle = THEME.muted;
+    ctx.fillText('CPU ', 144, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = THEME.text;
+    ctx.fillText(sCpu, 186, y);
+    ctx.textAlign = 'left';
+    ctx.fillText('%', 186, y);
+
+    // ROM block
+    ctx.textAlign = 'left';
+    ctx.fillStyle = THEME.muted;
+    ctx.fillText('ROM ', 204, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = THEME.text;
+    ctx.fillText(sRom, 246, y);
+    ctx.textAlign = 'left';
+    ctx.fillText('%', 246, y);
+
+    // RAM block
+    ctx.textAlign = 'left';
+    ctx.fillStyle = THEME.muted;
+    ctx.fillText('RAM ', 264, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = THEME.text;
+    ctx.fillText(sRam, 306, y);
+    ctx.textAlign = 'left';
+    ctx.fillText('%', 306, y);
+  }
+  ctx.fillStyle = THEME.border; ctx.fillRect(0, L.STATUS_Y_TOP, 320, 1);   // hairline
+}
+
+// mirrors the firmware's PriceFont: height-filling mono digits, squeezed
+// horizontally so a 6-digit price still fits the row (gen_price_font.py)
 function drawPrice() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, L.SIDE_COL_X0, L.PRICE_Y_H);
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, 320, L.PRICE_Y_H);
   const stale = !S.priceOkMs || Date.now() - S.priceOkMs > CONFIG.PRICE_STALE_MS;
   const txt = S.price > 0 ? fmtThousands(S.price) : '-----';
-  const maxW = L.SIDE_COL_X0 - 2 * L.PRICE_LEFT_PAD;
-  ctx.font = 'bold 66px sans-serif';
-  const big = ctx.measureText(txt).width <= maxW;
-  ctx.font = big ? 'bold 66px sans-serif' : 'bold 40px sans-serif';
+  const maxW = 320 - 2 * L.PRICE_LEFT_PAD;
+  // ~FONT_PX from gen script (yAdvance fills PRICE_Y_H); canvas then h-scales
+  const fontPx = Math.floor(L.PRICE_Y_H * 0.9);
+  ctx.font = `bold ${fontPx}px ${MONO}`;
+  const natural = ctx.measureText(txt).width;
+  const big = natural <= maxW * 1.35; // 7-digit still falls back
   ctx.fillStyle = stale ? THEME.dim : THEME.text;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText(txt, L.PRICE_LEFT_PAD, L.PRICE_Y_TOP + L.PRICE_Y_H / 2);
+  const y = L.PRICE_Y_TOP + L.PRICE_Y_H / 2;
+  if (!big) {
+    ctx.font = `bold 40px ${MONO}`;
+    ctx.fillText(txt, L.PRICE_LEFT_PAD, y);
+    return;
+  }
+  const hScale = Math.min(1, maxW / Math.max(natural, 1));
+  ctx.save();
+  ctx.translate(L.PRICE_LEFT_PAD, y);
+  ctx.scale(hScale, 1);
+  ctx.fillText(txt, 0, 0);
+  ctx.restore();
 }
 
-// F&G stacked above the 24h change, right-aligned in their own column
-function drawSub() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(L.SIDE_COL_X0, L.PRICE_Y_TOP, L.SIDE_COL_W, L.PRICE_Y_H);
+// tinted pill badge — mirrors drawPill() in screen.cpp
+function pill(txt, x, yTop, fg, fill, rightAlign) {
+  ctx.font = `bold 13px ${SANS}`;
+  const w = Math.round(ctx.measureText(txt).width) + 20;
+  if (rightAlign) x -= w;
+  ctx.fillStyle = fill;
+  ctx.beginPath(); ctx.roundRect(x, yTop, w, L.DELTA_H, L.DELTA_H / 2); ctx.fill();
+  ctx.fillStyle = fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, x + w / 2, yTop + L.DELTA_H / 2 + 1);
+  return w;
+}
+
+// delta row under the price: 24h-change pill (left), F&G label + pill (right)
+function drawDelta() {
+  ctx.fillStyle = THEME.bg;
+  ctx.fillRect(0, L.DELTA_Y_TOP, 320, L.DELTA_H);
   const fngStale = !S.fngOkMs || Date.now() - S.fngOkMs > fngStaleMs();
-  ctx.font = 'bold 20px sans-serif';
-  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  const x = 320 - 4;
-  if (S.fng >= 0) {
-    ctx.fillStyle = fngStale ? THEME.dim : fngColor(S.fng);
-    ctx.fillText(String(S.fng), x, L.PRICE_Y_TOP + 26);
-  }
+  const cy = L.DELTA_Y_TOP + L.DELTA_H / 2;
   if (!isNaN(S.changePct)) {
     const c = (S.changePct >= 0 ? '+' : '') + Math.round(S.changePct) + '%';
-    ctx.fillStyle = S.changePct >= 0 ? THEME.green : THEME.red;
-    ctx.fillText(c, x, L.PRICE_Y_TOP + 62);
+    const fg = S.changePct >= 0 ? THEME.green : THEME.red;
+    pill(c, L.PRICE_LEFT_PAD, L.DELTA_Y_TOP, fg, tint(fg), false);
+  }
+  if (S.fng >= 0) {
+    const band = fngColor(S.fng);
+    const fg   = fngStale ? THEME.dim : band;
+    const fill = fngStale ? THEME.surface : tint(band);
+    const w = pill(String(S.fng), 312, L.DELTA_Y_TOP, fg, fill, true);
+    microLabel('FEAR & GREED', 312 - w - 8, cy, THEME.muted, 'right');
   }
 }
 
 function drawCDC() {
-  const top = L.CDC_BASE_Y - L.CDC_MAX_H - 2;
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, top, 320, 2 * L.CDC_MAX_H + 4);
+  ctx.fillStyle = THEME.bg;
+  ctx.fillRect(0, L.CDC_ROW_TOP, 320, L.CDC_ROW_H);
+  ctx.fillStyle = THEME.surface;
+  ctx.beginPath();
+  ctx.roundRect(L.CDC_CARD_X, L.CDC_ROW_TOP, L.CDC_CARD_W, L.CDC_ROW_H, 10);
+  ctx.fill();
   if (!S.cdcValid || !S.cdc.length) return;
   const diffs = S.cdc.map(b => b.diff);
   const mn = Math.min(...diffs), mx = Math.max(...diffs);
   const range = (mx - mn) || 1;
-  const X0 = 10, SLOT = 10, BARW = 7;
+  // midline the bars grow from — visible in the slot gaps
+  ctx.fillStyle = THEME.border;
+  ctx.fillRect(L.CDC_CARD_X + 10, L.CDC_BASE_Y - 1, L.CDC_CARD_W - 20, 1);
+  // 30 slots centered in the card; bars fade with age — oldest dimmest,
+  // today full color with a ring — so the strip itself encodes time
+  const SLOT = 9, BARW = 6;
+  const X0 = L.CDC_CARD_X + (L.CDC_CARD_W - 30 * SLOT) / 2;
   S.cdc.forEach((b, i) => {
     const h = Math.round(L.CDC_MIN_H + (b.diff - mn) / range * (L.CDC_MAX_H - L.CDC_MIN_H));
     const x = X0 + i * SLOT + (SLOT - BARW) / 2;
     const y = b.bull ? L.CDC_BASE_Y - h : L.CDC_BASE_Y;
-    ctx.fillStyle = b.bull ? THEME.green : THEME.red;
-    ctx.fillRect(x, y, BARW, h);
-    if (i === S.cdc.length - 1) { ctx.strokeStyle = THEME.text; ctx.lineWidth = 1; ctx.strokeRect(x - 1, y - 1, BARW + 2, h + 2); }
+    ctx.fillStyle = lerpHex(THEME.surface, b.bull ? THEME.green : THEME.red,
+                            (96 + i * 159 / 29) / 255);
+    ctx.beginPath(); ctx.roundRect(x, y, BARW, h, h >= 6 ? 2 : 0); ctx.fill();
+    if (i === S.cdc.length - 1) {
+      ctx.strokeStyle = THEME.text; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(x - 1.5, y - 1.5, BARW + 3, h + 3, 3); ctx.stroke();
+    }
   });
 }
 
 function drawFees() {
   ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.FEES_Y_TOP, 320, L.FEES_Y_H);
   const stale = !S.feesOkMs || Date.now() - S.feesOkMs > CONFIG.FEES_STALE_MS;
-  const names = ['No', 'Low', 'Med', 'High'];
+  const names = ['NO', 'LOW', 'MED', 'HIGH'];
   const vals = [S.fees.no, S.fees.low, S.fees.med, S.fees.high];
-  const parts = [];
   names.forEach((n, i) => {
-    parts.push({ t: (i ? '   ' : '') + n + ' ', c: THEME.dim, bold: false });
-    parts.push({ t: fmtFee(vals[i]), c: stale ? THEME.dim : THEME.orange, bold: true });
+    const cx = L.FEES_X0 + i * (L.CHIP_W + L.CHIP_GAP);
+    ctx.fillStyle = THEME.surface;
+    ctx.beginPath(); ctx.roundRect(cx, L.FEES_Y_TOP, L.CHIP_W, L.FEES_Y_H, 8); ctx.fill();
+    ctx.save(); ctx.textAlign = 'center';
+    ctx.font = `9px ${MONO}`; ctx.letterSpacing = '1px';
+    ctx.fillStyle = THEME.muted; ctx.textBaseline = 'middle';
+    ctx.fillText(n, cx + L.CHIP_W / 2, L.FEES_Y_TOP + 9);
+    ctx.restore(); ctx.letterSpacing = '0px';
+    ctx.font = `bold 13px ${SANS}`;
+    ctx.fillStyle = stale ? THEME.dim : THEME.orange;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(fmtFee(vals[i]), cx + L.CHIP_W / 2, L.FEES_Y_TOP + 21);
   });
-  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  let total = 0;
-  for (const p of parts) { ctx.font = p.bold ? 'bold 15px sans-serif' : '13px sans-serif'; total += ctx.measureText(p.t).width; }
-  let x = (320 - total) / 2;
-  const y = L.FEES_Y_TOP + L.FEES_Y_H / 2 + 4;
-  for (const p of parts) { ctx.font = p.bold ? 'bold 15px sans-serif' : '13px sans-serif'; ctx.fillStyle = p.c; ctx.fillText(p.t, x, y); x += ctx.measureText(p.t).width; }
 }
 
 function drawOffline() {
   ctx.fillStyle = THEME.bg;
-  ctx.fillRect(0, 24, 320, 216);
+  ctx.fillRect(0, 0, 320, L.STATUS_Y_TOP);
 
-  // Draw warning triangle
-  ctx.beginPath();
-  ctx.moveTo(160, 55);
-  ctx.lineTo(188, 107);
-  ctx.lineTo(132, 107);
-  ctx.closePath();
-  ctx.fillStyle = THEME.orange;
-  ctx.fill();
+  // centered card with a wifi glyph built from arcs (fan over the top)
+  ctx.fillStyle = THEME.surface;
+  ctx.beginPath(); ctx.roundRect(36, 27, 248, 164, 16); ctx.fill();
+  ctx.strokeStyle = THEME.orange; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  for (const r of [9, 17, 25]) {
+    ctx.beginPath(); ctx.arc(160, 101, r, -3 * Math.PI / 4, -Math.PI / 4); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.fillStyle = THEME.orange;
+  ctx.arc(160, 101, 3, 0, Math.PI * 2); ctx.fill();
 
-  // Draw exclamation mark inside triangle
-  ctx.fillStyle = THEME.bg;
-  ctx.fillRect(158, 70, 4, 22);
-  ctx.beginPath();
-  ctx.arc(160, 99, 2, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Draw text
   ctx.fillStyle = THEME.text;
-  ctx.font = 'bold 15px sans-serif';
+  ctx.font = `bold 13px ${SANS}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('No Wi-Fi Connection', 160, 138);
+  ctx.fillText('No Wi-Fi Connection', 160, 135);
 
-  ctx.fillStyle = THEME.dim;
-  ctx.font = '13px sans-serif';
-  ctx.fillText('reconnecting to network...', 160, 168);
-  ctx.fillText('Setup AP: BTC-Ticker', 160, 198);
+  ctx.font = `12px ${SANS}`;
+  ctx.fillStyle = THEME.text2;
+  ctx.fillText('reconnecting to network...', 160, 159);
+  ctx.fillStyle = THEME.muted;
+  ctx.fillText('Setup AP: BTC-Ticker', 160, 179);
+}
+
+// 10×10 rotate glyph matching FLIP_BMP in screen.cpp
+const FLIP_BMP = [
+  0b00111100, 0b01000010, 0b10011001, 0b10100101, 0b10000001,
+  0b10000001, 0b10100101, 0b10011001, 0b01000010, 0b00111100,
+];
+function drawFlipIcon() {
+  const x0 = L.FLIP_ICON_X, y0 = L.FLIP_ICON_Y, s = L.FLIP_ICON_S;
+  ctx.fillStyle = THEME.bg;
+  ctx.fillRect(x0 - 1, y0 - 1, s + 2, s + 2);
+  ctx.fillStyle = THEME.muted;
+  for (let row = 0; row < s; row++) {
+    const bits = FLIP_BMP[row];
+    for (let col = 0; col < s; col++) {
+      if (bits & (0x80 >> col)) ctx.fillRect(x0 + col, y0 + row, 1, 1);
+    }
+  }
+}
+function hitFlipIcon(x, y) {
+  const pad = L.FLIP_HIT_PAD;
+  return x >= L.FLIP_ICON_X - pad && x < L.FLIP_ICON_X + L.FLIP_ICON_S + pad &&
+         y >= L.FLIP_ICON_Y - pad && y < L.FLIP_ICON_Y + L.FLIP_ICON_S + pad;
 }
 
 let wasOffline = false;
 let offlineDrawn = false;
 let needClear = true;
+let screenFlipped = false;
 
 function render() {
   const isOffline = (S.netState === 2);
@@ -354,6 +486,9 @@ function render() {
     needClear = false;
   }
 
+  // CSS rotate mirrors firmware setRotation(1) ↔ setRotation(3)
+  cvs.style.transform = screenFlipped ? 'rotate(180deg)' : '';
+
   drawStatus();
 
   if (isOffline) {
@@ -362,8 +497,9 @@ function render() {
       offlineDrawn = true;
     }
   } else {
-    drawPrice(); drawSub(); drawCDC(); drawFees();
+    drawPrice(); drawDelta(); drawCDC(); drawFees();
   }
+  drawFlipIcon();
 
   updateNetState();
   updateBacklight();
@@ -380,27 +516,24 @@ function updateNetState() {
   else S.netState = 0;
 }
 
-// ── BACKLIGHT — mirrors updateBacklight() in main.cpp ────
-let blMode = 0; // 0 auto, 1..3 fixed
-function computeBacklightDuty() {
-  if (blMode === 0) {
-    const raw = Number(document.getElementById('ldr').value);
-    let dark = (raw - CONFIG.LDR_BRIGHT_RAW) / (CONFIG.LDR_DARK_RAW - CONFIG.LDR_BRIGHT_RAW);
-    dark = Math.max(0, Math.min(1, dark));
-    return CONFIG.BL_MIN_DUTY + Math.round((1 - dark) * (255 - CONFIG.BL_MIN_DUTY));
-  }
-  return blMode === 1 ? 255 : blMode === 2 ? 140 : 64;
-}
+// ── BACKLIGHT — fixed at BL_DUTY like the firmware (no tap/LDR control) ──
 function updateBacklight() {
-  const duty = computeBacklightDuty();
-  document.getElementById('dimOverlay').style.opacity = (1 - duty / 255).toFixed(2);
+  document.getElementById('dimOverlay').style.opacity = (1 - CONFIG.BL_DUTY / 255).toFixed(2);
 }
-document.getElementById('screen').addEventListener('click', () => {
-  blMode = (blMode + 1) % 4;
-  log(`tap -> backlight mode ${blMode === 0 ? 'auto' : blMode}`);
+document.getElementById('screen').addEventListener('click', (e) => {
+  const rect = cvs.getBoundingClientRect();
+  // map click into 320×240 canvas space (account for CSS scale / 180° flip)
+  let x = ((e.clientX - rect.left) / rect.width) * 320;
+  let y = ((e.clientY - rect.top) / rect.height) * 240;
+  if (screenFlipped) { x = 319 - x; y = 239 - y; }
+  if (hitFlipIcon(x, y)) {
+    screenFlipped = !screenFlipped;
+    needClear = true;
+    log(`tap flip icon -> ${screenFlipped ? '180°' : '0°'}`);
+    return;
+  }
+  log(`tap (${Math.round(x)},${Math.round(y)}) ignored — backlight fixed`);
 });
-document.getElementById('tapBtn').addEventListener('click', () => document.getElementById('screen').dispatchEvent(new Event('click')));
-document.getElementById('ldr').addEventListener('input', e => document.getElementById('ldrVal').textContent = e.target.value);
 
 // ── FNG staleness scales with the demo-speed toggle so you can actually
 // see the dim-on-stale behavior without waiting a real 3+ hours
@@ -617,7 +750,6 @@ document.getElementById('restartBtn').addEventListener('click', () => {
   Object.assign(S, defaultState());
   cacheLoad();
   jobs.forEach(j => { j.next = 0; j.backoff = CONFIG.RETRY_BASE_MS; });
-  blMode = 0;
 });
 document.getElementById('resetCacheBtn').addEventListener('click', () => {
   localStorage.removeItem(CACHE_KEY);
@@ -641,7 +773,7 @@ function ago(ms) { return ms ? ((Date.now() - ms) / 1000).toFixed(0) + 's ago' :
 function updateHud() {
   document.getElementById('hud').innerHTML = `
     <b>net:</b> ${['connecting', 'live', 'reconnecting'][S.netState]} &nbsp;
-    <b>backlight:</b> ${blMode === 0 ? 'auto' : ['', '100%', '55%', '25%'][blMode]} (${computeBacklightDuty()}/255)<br>
+    <b>backlight:</b> fixed 90% (${CONFIG.BL_DUTY}/255)<br>
     <b>price:</b> ${ago(S.priceOkMs)} — next in ${Math.max(0, Math.round((jobs[0].next - Date.now()) / 1000))}s<br>
     <b>fees:</b> ${ago(S.feesOkMs)} — next in ${Math.max(0, Math.round((jobs[1].next - Date.now()) / 1000))}s<br>
     <b>F&amp;G:</b> ${ago(S.fngOkMs)} — next in ${Math.max(0, Math.round((jobs[2].next - Date.now()) / 1000))}s<br>
