@@ -266,14 +266,38 @@ static void handleTouch() {
   wasDown = true;
   lastTap = now;
 
-  if (screenHitFlipIcon(x, y)) {
-    bool flipped = screenToggleFlip();
-    Serial.printf("screen flip -> rot %u (%s) @ %d,%d\n",
-                  flipped ? 3u : 1u, flipped ? "180" : "0", (int)x, (int)y);
+  // [SETTINGS] button — navigates to settings page. Skip the hit test while
+  // already on settings: the button's tap zone overlaps the "< BACK" label
+  // there, and taking this branch would swallow the back tap.
+  if (!screenIsOnSettings() && screenHitSettingsButton(x, y)) {
+    screenShowSettings();
+    Serial.println("-> settings page");
     return;
   }
 
-  // backlight is fixed at BL_DUTY — taps outside the flip icon do nothing
+  // Route touches to settings page handler
+  if (screenIsOnSettings()) {
+    int result = screenSettingsHandleTouch(x, y);
+    if (result >= 0) {
+      // Brightness step selected — apply immediately
+      ledcWrite(BL_CHANNEL, screenGetBlDuty());
+      Serial.printf("settings: brightness step %d -> duty %d\n",
+                    result, (int)screenGetBlDuty());
+    } else if (result == -1) {
+      // Flip button tapped
+      bool flipped = screenToggleFlip();
+      Serial.printf("settings: flip -> %s\n", flipped ? "180" : "0");
+      // Stay on settings page, redraw to show new selection
+      screenShowSettings();
+    } else if (result == -2) {
+      // Back button
+      screenShowTicker();
+      Serial.println("<- ticker page");
+    }
+    // result == -3: dead zone, do nothing
+    return;
+  }
+
   Serial.printf("tap ignored (%d,%d z=%u raw=%u,%u)\n",
                 (int)x, (int)y, (unsigned)rz,
                 (unsigned)rx, (unsigned)ry);
@@ -329,11 +353,11 @@ void setup() {
                 PIN_TOUCH_CS, PIN_TOUCH_IRQ);
 
   screenInit();
-  // TFT_eSPI's init drove the backlight pin digitally; take it over with PWM
-  // at the fixed brightness (no tap/LDR adjustment)
+  // TFT_eSPI's init drove the backlight pin digitally; take it over with PWM.
+  // Brightness is persisted in NVS via screenGetBlDuty().
   ledcSetup(BL_CHANNEL, 5000, 8);
   ledcAttachPin(PIN_BACKLIGHT, BL_CHANNEL);
-  ledcWrite(BL_CHANNEL, BL_DUTY);
+  ledcWrite(BL_CHANNEL, screenGetBlDuty());
 
   // paint last-known values immediately (dim until live data arrives)
   cacheLoad(S);

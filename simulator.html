@@ -18,9 +18,95 @@
   }
   .device .brand { font-size: 10px; color: #7a6a10; text-align: center; margin-bottom: 8px; letter-spacing: .05em; }
   .screen-wrap { position: relative; border: 3px solid #222; border-radius: 4px; overflow: hidden; }
-  canvas { display: block; cursor: pointer; }
+  canvas { display: block; cursor: pointer; transition: transform 0.35s ease; }
+  canvas.flipped { transform: rotate(180deg); }
   .dim-overlay { position: absolute; inset: 0; background: #000; pointer-events: none; }
   .hint { text-align: center; font-size: 10px; color: #7a6a10; margin-top: 8px; }
+
+  /* ── [SETTINGS] text button overlay (top-left of screen) — mirrors
+     drawSettingsButton() in screen.cpp: GLCD-ish font, thin border ── */
+  .settings-btn {
+    position: absolute;
+    top: 4px; left: 4px;
+    padding: 3px 4px;
+    border: 1px solid #5C6980;
+    color: #5C6980;
+    background: #07090D;
+    font: 8px/1 "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    letter-spacing: 0;
+    cursor: pointer;
+    z-index: 10;
+    opacity: 0.85;
+    transition: opacity 0.15s;
+    user-select: none;
+  }
+  .settings-btn:hover { opacity: 1; }
+
+  /* ── settings modal — lives inside .screen-wrap so it's clipped to screen bounds ── */
+  .modal-backdrop {
+    display: none;
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 20;
+    align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: #1c1f25;
+    border: 1px solid #3a3d44;
+    border-radius: 10px;
+    padding: 14px 16px 12px;
+    width: 280px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.8);
+    animation: modalIn 0.15s ease;
+  }
+  @keyframes modalIn {
+    from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+    to   { opacity: 1; transform: none; }
+  }
+  .modal h2 {
+    margin: 0 0 12px;
+    font-size: 12px; color: #fff; letter-spacing: .04em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .modal h2 svg { opacity: 0.8; flex-shrink: 0; }
+  .modal-row {
+    display: flex; align-items: center; gap: 8px;
+    margin: 8px 0;
+  }
+  .modal-row label { font-size: 11px; color: #aaa; min-width: 70px; }
+  .modal-row input[type=range] { flex: 1; accent-color: #f7931a; height: 4px; cursor: pointer; }
+  .modal-row .val { font-size: 11px; color: #eee; min-width: 32px; text-align: right; }
+  .modal-divider { border: none; border-top: 1px solid #2e3238; margin: 10px 0; }
+  .modal-toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 8px 0;
+  }
+  .modal-toggle-row label { font-size: 11px; color: #aaa; }
+  /* toggle switch */
+  .toggle { position: relative; display: inline-block; width: 34px; height: 20px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .knob {
+    position: absolute; inset: 0;
+    background: #2e3238; border-radius: 20px;
+    cursor: pointer; transition: background 0.2s;
+  }
+  .toggle .knob::before {
+    content: ''; position: absolute;
+    left: 3px; top: 3px;
+    width: 14px; height: 14px;
+    background: #666; border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+  }
+  .toggle input:checked + .knob { background: rgba(247,147,26,0.25); }
+  .toggle input:checked + .knob::before { transform: translateX(14px); background: #f7931a; }
+  .modal-close {
+    display: block; width: 100%; margin-top: 12px;
+    background: #2a2d33; border: 1px solid #4a4e56; color: #ccc;
+    border-radius: 6px; padding: 6px 0; font-size: 11px; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .modal-close:hover { background: #34383f; }
 
   .panel { flex: 1 1 420px; min-width: 380px; max-width: 560px; }
   fieldset {
@@ -59,8 +145,40 @@
   <div class="screen-wrap">
     <canvas id="screen" width="320" height="240"></canvas>
     <div class="dim-overlay" id="dimOverlay"></div>
+    <!-- [SETTINGS] text button overlay (top-left of screen) -->
+    <div class="settings-btn" id="settingsBtn">SETTINGS</div>
+    <!-- Settings modal — inside screen-wrap so it's clipped to screen bounds -->
+    <div class="modal-backdrop" id="settingsBackdrop">
+      <div class="modal">
+        <h2>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f7931a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Settings
+        </h2>
+
+        <div class="modal-row">
+          <label>Backlight</label>
+          <input type="range" id="settingsBrightness" min="0" max="100" value="90">
+          <span class="val" id="settingsBrightnessVal">90%</span>
+        </div>
+
+        <hr class="modal-divider">
+
+        <div class="modal-toggle-row">
+          <label>Flip the screen</label>
+          <label class="toggle">
+            <input type="checkbox" id="settingsFlip">
+            <span class="knob"></span>
+          </label>
+        </div>
+
+        <button class="modal-close" id="settingsClose">Close</button>
+      </div>
+    </div>
   </div>
-  <div class="hint">bottom-right icon = flip 180° (backlight fixed at 90%)</div>
+  <div class="hint">tap [SETTINGS] = settings</div>
 </div>
 
 <div class="panel">
@@ -166,7 +284,7 @@ const CONFIG = {
   RETRY_MAX_MS:  60000,
   LDR_BRIGHT_RAW: 300,
   LDR_DARK_RAW:   3800,
-  BL_DUTY:        230,  // fixed brightness, ~90% (no tap/LDR control)
+  BL_DUTY:        230,  // default brightness ~90%
 };
 CONFIG.PRICE_STALE_MS = 3 * CONFIG.PRICE_INTERVAL_MS + 30000;
 CONFIG.FEES_STALE_MS  = 3 * CONFIG.FEES_INTERVAL_MS;
@@ -207,11 +325,7 @@ const L = { PRICE_Y_TOP: 6, PRICE_Y_H: 104, PRICE_LEFT_PAD: 8,
             CDC_ROW_TOP: 144, CDC_ROW_H: 36, CDC_CARD_X: 8, CDC_CARD_W: 304,
             CDC_BASE_Y: 162, CDC_MAX_H: 13, CDC_MIN_H: 2,
             FEES_Y_TOP: 186, FEES_Y_H: 30, FEES_X0: 8, CHIP_W: 68, CHIP_GAP: 6,
-            STATUS_Y_TOP: 218, STATUS_H: 22,
-            FLIP_ICON_S: 10, FLIP_ICON_M: 2,
-            get FLIP_ICON_X() { return 320 - this.FLIP_ICON_S - this.FLIP_ICON_M; },
-            get FLIP_ICON_Y() { return this.FLIP_ICON_M; },
-            FLIP_HIT_PAD: 10 };
+            STATUS_Y_TOP: 218, STATUS_H: 22 };
 
 const cvs = document.getElementById('screen');
 const ctx = cvs.getContext('2d');
@@ -444,29 +558,6 @@ function drawOffline() {
   ctx.fillText('Setup AP: BTC-Ticker', 160, 179);
 }
 
-// 10×10 rotate glyph matching FLIP_BMP in screen.cpp
-const FLIP_BMP = [
-  0b00111100, 0b01000010, 0b10011001, 0b10100101, 0b10000001,
-  0b10000001, 0b10100101, 0b10011001, 0b01000010, 0b00111100,
-];
-function drawFlipIcon() {
-  const x0 = L.FLIP_ICON_X, y0 = L.FLIP_ICON_Y, s = L.FLIP_ICON_S;
-  ctx.fillStyle = THEME.bg;
-  ctx.fillRect(x0 - 1, y0 - 1, s + 2, s + 2);
-  ctx.fillStyle = THEME.muted;
-  for (let row = 0; row < s; row++) {
-    const bits = FLIP_BMP[row];
-    for (let col = 0; col < s; col++) {
-      if (bits & (0x80 >> col)) ctx.fillRect(x0 + col, y0 + row, 1, 1);
-    }
-  }
-}
-function hitFlipIcon(x, y) {
-  const pad = L.FLIP_HIT_PAD;
-  return x >= L.FLIP_ICON_X - pad && x < L.FLIP_ICON_X + L.FLIP_ICON_S + pad &&
-         y >= L.FLIP_ICON_Y - pad && y < L.FLIP_ICON_Y + L.FLIP_ICON_S + pad;
-}
-
 let wasOffline = false;
 let offlineDrawn = false;
 let needClear = true;
@@ -499,7 +590,6 @@ function render() {
   } else {
     drawPrice(); drawDelta(); drawCDC(); drawFees();
   }
-  drawFlipIcon();
 
   updateNetState();
   updateBacklight();
@@ -516,23 +606,48 @@ function updateNetState() {
   else S.netState = 0;
 }
 
-// ── BACKLIGHT — fixed at BL_DUTY like the firmware (no tap/LDR control) ──
+// ── BACKLIGHT — controlled by settings modal slider ────────
+// blDuty is 0-255; default matches upstream BL_DUTY (~90%)
+let blDuty = CONFIG.BL_DUTY;
 function updateBacklight() {
-  document.getElementById('dimOverlay').style.opacity = (1 - CONFIG.BL_DUTY / 255).toFixed(2);
+  document.getElementById('dimOverlay').style.opacity = (1 - blDuty / 255).toFixed(2);
 }
+
+// Screen tap — no backlight cycling (backlight is in settings modal now)
 document.getElementById('screen').addEventListener('click', (e) => {
-  const rect = cvs.getBoundingClientRect();
-  // map click into 320×240 canvas space (account for CSS scale / 180° flip)
-  let x = ((e.clientX - rect.left) / rect.width) * 320;
-  let y = ((e.clientY - rect.top) / rect.height) * 240;
-  if (screenFlipped) { x = 319 - x; y = 239 - y; }
-  if (hitFlipIcon(x, y)) {
-    screenFlipped = !screenFlipped;
-    needClear = true;
-    log(`tap flip icon -> ${screenFlipped ? '180°' : '0°'}`);
-    return;
-  }
-  log(`tap (${Math.round(x)},${Math.round(y)}) ignored — backlight fixed`);
+  if (e.target.closest('#settingsBtn') || e.target.closest('.modal-backdrop')) return;
+  // taps on the main screen area are passed through to the canvas (no-op for now)
+});
+
+// ── SETTINGS MODAL ────────────────────────────────────────
+const settingsBtn      = document.getElementById('settingsBtn');
+const settingsBackdrop = document.getElementById('settingsBackdrop');
+const settingsClose    = document.getElementById('settingsClose');
+const brightnessSlider = document.getElementById('settingsBrightness');
+const brightnessVal    = document.getElementById('settingsBrightnessVal');
+const flipCheckbox     = document.getElementById('settingsFlip');
+
+function openSettings() { settingsBackdrop.classList.add('open'); }
+function closeSettings() { settingsBackdrop.classList.remove('open'); }
+
+settingsBtn.addEventListener('click', (e) => { e.stopPropagation(); openSettings(); });
+settingsClose.addEventListener('click', closeSettings);
+settingsBackdrop.addEventListener('click', (e) => { if (e.target === settingsBackdrop) closeSettings(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+
+// Brightness slider (0-100%) → blDuty (0-255)
+brightnessSlider.addEventListener('input', () => {
+  const pct = Number(brightnessSlider.value);
+  brightnessVal.textContent = pct + '%';
+  blDuty = Math.round(pct / 100 * 255);
+  log(`settings: brightness set to ${pct}%`);
+});
+
+// Flip toggle → rotate canvas 180°
+flipCheckbox.addEventListener('change', () => {
+  screenFlipped = flipCheckbox.checked;
+  needClear = true;
+  log(`settings: screen ${screenFlipped ? 'flipped 180°' : 'back to normal'}`);
 });
 
 // ── FNG staleness scales with the demo-speed toggle so you can actually
@@ -771,9 +886,10 @@ function log(msg, isErr) {
 
 function ago(ms) { return ms ? ((Date.now() - ms) / 1000).toFixed(0) + 's ago' : 'never'; }
 function updateHud() {
+  const pct = Math.round(blDuty / 255 * 100);
   document.getElementById('hud').innerHTML = `
     <b>net:</b> ${['connecting', 'live', 'reconnecting'][S.netState]} &nbsp;
-    <b>backlight:</b> fixed 90% (${CONFIG.BL_DUTY}/255)<br>
+    <b>backlight:</b> ${pct}% (${blDuty}/255) &nbsp; <b>flip:</b> ${screenFlipped ? '180°' : '0°'}<br>
     <b>price:</b> ${ago(S.priceOkMs)} — next in ${Math.max(0, Math.round((jobs[0].next - Date.now()) / 1000))}s<br>
     <b>fees:</b> ${ago(S.feesOkMs)} — next in ${Math.max(0, Math.round((jobs[1].next - Date.now()) / 1000))}s<br>
     <b>F&amp;G:</b> ${ago(S.fngOkMs)} — next in ${Math.max(0, Math.round((jobs[2].next - Date.now()) / 1000))}s<br>

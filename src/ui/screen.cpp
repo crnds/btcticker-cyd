@@ -12,12 +12,12 @@ TFT_eSPI tft;
 // landscape: 1 = USB on the right (default), 3 = 180° flip (USB on the left)
 static uint8_t screenRot = 1;
 
-// 10×10 flip icon, top-right corner (logical coords after setRotation)
-#define FLIP_ICON_S   10
-#define FLIP_ICON_M    2   // margin from screen edge
-#define FLIP_ICON_X   (320 - FLIP_ICON_S - FLIP_ICON_M)
-#define FLIP_ICON_Y   FLIP_ICON_M
-#define FLIP_HIT_PAD  10   // expand hit target beyond the 10×10 glyph
+// [SETTINGS] text button, top-left corner — GLCD font 1 (6x8) at text size 1
+#define SETTINGS_BTN_X       4   // margin from screen edge
+#define SETTINGS_BTN_Y       4
+#define SETTINGS_BTN_PAD_X   4   // border padding around the text
+#define SETTINGS_BTN_PAD_Y   3
+#define SETTINGS_BTN_HIT_PAD 8   // finger-friendly tap zone around the border
 
 // ── layout (320x240 landscape) ────────────────────────────
 //    2..106  price row: big price (custom PriceFont) full width
@@ -63,42 +63,68 @@ static struct { int fng, chg; bool fngStale, hasChg, force; }
 static struct { float no, low, med, high; bool stale, force; }
     dFees = {NAN, NAN, NAN, NAN, false, true};
 static uint32_t drawnCdcVersion = 0;
-static bool     cdcForce   = true;
-static bool     needClear  = true;
+static bool     cdcForce      = true;
+static bool     needClear     = true;
+// drawPrice()'s full-width sprite push covers the button's top-left corner,
+// so any price repaint erases it — settingsBtnDirty flags a needed redraw
+// instead of repainting unconditionally every loop pass (was visible as a
+// constant flicker: identical pixels rewritten ~40x/sec).
+static bool     settingsBtnDirty = true;
+
+// ── Settings page state ────────────────────────────────
+// blStep: 0=20% 1=40% 2=60% 3=80% 4=100%  (stored in NVS as "bl")
+static bool    onSettingsPage = false;
+static bool    settingsDrawn  = false;
+static uint8_t blStep         = 4;      // default 100%
+
+static uint8_t blStepToDuty(uint8_t s) {
+  // 20 / 40 / 60 / 80 / 100 % of 255
+  static const uint8_t T[5] = {51, 102, 153, 204, 255};
+  return T[s < 5 ? s : 4];
+}
+
+static void loadSettings() {
+  Preferences p;
+  if (!p.begin("ticker", true)) return;
+  uint8_t r  = p.getUChar("rot", 1);
+  uint8_t bl = p.getUChar("bl",  4);   // default step 4 = 100%
+  p.end();
+  screenRot = (r == 3) ? 3 : 1;
+  blStep    = (bl < 5) ? bl : 4;
+}
+
+static void saveSettings() {
+  Preferences p;
+  if (!p.begin("ticker", false)) return;
+  p.putUChar("rot", screenRot);
+  p.putUChar("bl",  blStep);
+  p.end();
+}
+
+uint8_t screenGetBlDuty() { return blStepToDuty(blStep); }
 
 static bool feeEq(float a, float b) {
   return (isnan(a) && isnan(b)) || a == b;
 }
 
-static void loadRotation() {
-  Preferences p;
-  if (!p.begin("ticker", true)) return;
-  uint8_t r = p.getUChar("rot", 1);
-  p.end();
-  screenRot = (r == 3) ? 3 : 1;
-}
-
-static void saveRotation() {
-  Preferences p;
-  if (!p.begin("ticker", false)) return;
-  p.putUChar("rot", screenRot);
-  p.end();
-}
+// loadRotation / saveRotation replaced by loadSettings / saveSettings above
 
 void screenInit() {
   tft.init();
-  loadRotation();
+  loadSettings();
   tft.setRotation(screenRot);
   tft.fillScreen(C_BG);
 }
 
 void screenInvalidate() {
-  needClear = true;
-  dStatus.force = true;
-  dPrice.force = true;
-  dDelta.force = true;
-  dFees.force = true;
-  cdcForce = true;
+  needClear        = true;
+  settingsDrawn    = false;   // force settings overlay repaint if re-opened
+  dStatus.force    = true;
+  dPrice.force     = true;
+  dDelta.force     = true;
+  dFees.force      = true;
+  cdcForce         = true;
+  settingsBtnDirty = true;
 }
 
 bool screenIsFlipped() { return screenRot == 3; }
@@ -106,43 +132,132 @@ bool screenIsFlipped() { return screenRot == 3; }
 bool screenToggleFlip() {
   screenRot = (screenRot == 1) ? 3 : 1;
   tft.setRotation(screenRot);
-  saveRotation();
+  saveSettings();
   screenInvalidate();
   return screenIsFlipped();
 }
 
-bool screenHitFlipIcon(int16_t x, int16_t y) {
-  int x0 = FLIP_ICON_X - FLIP_HIT_PAD;
-  int y0 = FLIP_ICON_Y - FLIP_HIT_PAD;
-  int x1 = FLIP_ICON_X + FLIP_ICON_S + FLIP_HIT_PAD;
-  int y1 = FLIP_ICON_Y + FLIP_ICON_S + FLIP_HIT_PAD;
-  return x >= x0 && x < x1 && y >= y0 && y < y1;
+bool screenIsOnSettings()  { return onSettingsPage; }
+void screenShowSettings()  { onSettingsPage = true;  settingsDrawn = false; }
+void screenShowTicker()    { onSettingsPage = false; screenInvalidate(); }
+
+// button box: text (6px/char, no tracking, at GLCD size 1) + padding + 1px border
+static int settingsBtnW() {
+  return (int)strlen("SETTINGS") * 6 + SETTINGS_BTN_PAD_X * 2;
+}
+static int settingsBtnH() {
+  return 8 + SETTINGS_BTN_PAD_Y * 2;
 }
 
-// 10×10 rotate glyph (1 = foreground). Two chevrons suggesting a 180° flip.
-static const uint8_t FLIP_BMP[10] = {
-  0b00111100,
-  0b01000010,
-  0b10011001,
-  0b10100101,
-  0b10000001,
-  0b10000001,
-  0b10100101,
-  0b10011001,
-  0b01000010,
-  0b00111100,
-};
+bool screenHitSettingsButton(int16_t x, int16_t y) {
+  int w = settingsBtnW(), h = settingsBtnH();
+  return x >= SETTINGS_BTN_X - SETTINGS_BTN_HIT_PAD && x < SETTINGS_BTN_X + w + SETTINGS_BTN_HIT_PAD
+      && y >= SETTINGS_BTN_Y - SETTINGS_BTN_HIT_PAD && y < SETTINGS_BTN_Y + h + SETTINGS_BTN_HIT_PAD;
+}
 
-static void drawFlipIcon() {
-  // clear a 1px border so fee-row repaints don't leave crumbs
-  tft.fillRect(FLIP_ICON_X - 1, FLIP_ICON_Y - 1, FLIP_ICON_S + 2, FLIP_ICON_S + 2, C_BG);
-  for (int row = 0; row < FLIP_ICON_S; row++) {
-    uint8_t bits = FLIP_BMP[row];
-    for (int col = 0; col < FLIP_ICON_S; col++) {
-      if (bits & (0x80 >> col))
-        tft.drawPixel(FLIP_ICON_X + col, FLIP_ICON_Y + row, C_MUTED);
-    }
+static void drawSettingsButton() {
+  int w = settingsBtnW(), h = settingsBtnH();
+  tft.fillRect(SETTINGS_BTN_X, SETTINGS_BTN_Y, w, h, C_BG);
+  tft.drawRect(SETTINGS_BTN_X, SETTINGS_BTN_Y, w, h, C_MUTED);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("SETTINGS", SETTINGS_BTN_X + SETTINGS_BTN_PAD_X,
+                 SETTINGS_BTN_Y + SETTINGS_BTN_PAD_Y);
+}
+
+// ── Settings page ─────────────────────────────────────
+// Touch zones (320×240 logical):
+//   y  0- 44 : back to ticker   (returns -2)
+//   y 64-114 : brightness step  (returns 0-4)
+//   y134-200 : flip buttons     (returns -1)
+//   all else : no action        (returns -3)
+int screenSettingsHandleTouch(int16_t x, int16_t y) {
+  // Back header band
+  if (y < 44) return -2;
+
+  // Brightness row: five equal 64px-wide tiles
+  if (y >= 64 && y < 114) {
+    int step = x * 5 / 320;
+    if (step < 0) step = 0;
+    if (step > 4) step = 4;
+    blStep = (uint8_t)step;
+    saveSettings();
+    settingsDrawn = false;   // redraw to show new highlight
+    return step;
   }
+
+  // Flip row: left half = Normal, right half = Flipped. Only report -1
+  // (toggle) when the tapped tile differs from the current state — tapping
+  // the already-selected tile must not flip the screen.
+  if (y >= 134 && y < 200) {
+    bool wantFlipped = x >= 160;
+    return (wantFlipped != screenIsFlipped()) ? -1 : -3;
+  }
+
+  return -3;  // tap in dead zone — do nothing
+}
+
+static void drawSettingsPage() {
+  tft.fillScreen(C_BG);
+
+  // ── Back header ────────────────────────────────────
+  tft.fillRect(0, 0, 320, 44, C_SURFACE);
+  tft.setTextFont(1);
+  tft.setTextColor(C_TEXT2, C_SURFACE);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("< BACK", 14, 22);
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_TEXT, C_SURFACE);
+  tft.drawString("Settings", 160, 22);
+  tft.fillRect(0, 44, 320, 1, C_BORDER);  // hairline
+
+  // ── Backlight section ──────────────────────────────
+  tft.setTextFont(1);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("BACKLIGHT", 12, 56);
+
+  const char* pctLabels[5] = {"20%", "40%", "60%", "80%", "100%"};
+  int colW = 320 / 5;
+  for (int i = 0; i < 5; i++) {
+    int cx  = i * colW + colW / 2;
+    bool sel = (i == (int)blStep);
+    uint16_t fill = sel ? C_ORANGE : C_SURFACE;
+    uint16_t fg   = sel ? C_BG     : C_TEXT2;
+    tft.fillSmoothRoundRect(i * colW + 4, 64, colW - 8, 46, 8, fill, C_BG);
+    tft.setFreeFont(&FreeSansBold9pt7b);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(fg, fill);
+    tft.drawString(pctLabels[i], cx, 87);
+  }
+
+  tft.fillRect(0, 122, 320, 1, C_BORDER);  // section divider
+
+  // ── Flip screen section ────────────────────────────
+  tft.setTextFont(1);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("FLIP SCREEN", 12, 130);
+
+  bool flipped = screenIsFlipped();
+  // Left tile: Normal (rotation 0)
+  uint16_t normFill = !flipped ? C_ORANGE : C_SURFACE;
+  uint16_t normFg   = !flipped ? C_BG     : C_TEXT2;
+  tft.fillSmoothRoundRect(8,   138, 148, 56, 8, normFill, C_BG);
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(normFg, normFill);
+  tft.drawString("Normal", 82, 166);
+
+  // Right tile: Flipped (rotation 180)
+  uint16_t flipFill = flipped ? C_ORANGE : C_SURFACE;
+  uint16_t flipFg   = flipped ? C_BG     : C_TEXT2;
+  tft.fillSmoothRoundRect(164, 138, 148, 56, 8, flipFill, C_BG);
+  tft.setTextColor(flipFg, flipFill);
+  tft.drawString("Flipped", 238, 166);
 }
 
 void screenMessage(const char* line1, const char* line2) {
@@ -366,10 +481,12 @@ static void drawStatus() {
 // PriceFont (custom monospace, height-filling digits) is used whenever it
 // fits the full row width; falls back to FreeMonoBold24 for the rare case
 // of a wider string (e.g. a 7-digit price) so it never overflows
-static void drawPrice() {
+// Returns true if it repainted — the sprite push below covers the settings
+// button's corner, so callers use this to know when the button needs redraw.
+static bool drawPrice() {
   bool stale = S.priceOkMs == 0 || millis() - S.priceOkMs > PRICE_STALE_MS;
   uint32_t v = S.price > 0 ? (uint32_t)S.price : 0;
-  if (!dPrice.force && v == dPrice.val && stale == dPrice.stale) return;
+  if (!dPrice.force && v == dPrice.val && stale == dPrice.stale) return false;
   dPrice = {v, stale, false};
 
   String txt = v > 0 ? fmtThousands(v) : "-----";
@@ -395,6 +512,7 @@ static void drawPrice() {
     tft.setTextColor(stale ? C_DIM : C_TEXT, C_BG);
     tft.drawString(txt, PRICE_LEFT_PAD, PRICE_Y_TOP + PRICE_Y_H / 2);
   }
+  return true;
 }
 
 // delta row under the price: 24h change as a tinted pill on the left,
@@ -515,13 +633,23 @@ static void drawOffline() {
 
 // ── render ────────────────────────────────────────────────
 void screenRender() {
-  static bool wasOffline = false;
+  // ── Settings page — completely isolated, no ticker content runs ──
+  if (onSettingsPage) {
+    if (!settingsDrawn) {
+      drawSettingsPage();
+      settingsDrawn = true;
+    }
+    return;
+  }
+
+  // ── Ticker page ────────────────────────────────────
+  static bool wasOffline  = false;
   static bool offlineDrawn = false;
 
   bool isOffline = (S.netState == 2);
   if (isOffline != wasOffline) {
     screenInvalidate();
-    wasOffline = isOffline;
+    wasOffline   = isOffline;
     offlineDrawn = false;
   }
 
@@ -537,14 +665,19 @@ void screenRender() {
       tft.fillRect(0, 0, 320, STATUS_Y_TOP, C_BG);
       drawOffline();
       offlineDrawn = true;
+      settingsBtnDirty = true;
     }
   } else {
-    drawPrice();
+    if (drawPrice()) settingsBtnDirty = true;  // sprite push covers the button
     drawDelta();
     drawCDC();
     drawFees();
   }
 
-  // always last — fee-row fillRect would otherwise erase it
-  drawFlipIcon();
+  // only repaint the button when something actually erased it — otherwise
+  // this redraws identical pixels every loop pass, which reads as flicker
+  if (settingsBtnDirty) {
+    drawSettingsButton();
+    settingsBtnDirty = false;
+  }
 }
