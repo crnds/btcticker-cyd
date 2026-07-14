@@ -319,10 +319,14 @@ function lerpHex(a, b, t) {
 }
 const tint = c => lerpHex(THEME.bg, c, 56 / 255);
 
-// logical 320x240 coordinate space, same numbers as screen.cpp
+// logical 320x240 coordinate space, same numbers as screen.cpp.
+// SCREEN_W is the physical panel; CONTENT_W is where the UI is actually
+// drawn — the rightmost 16px (5%) stay black to match the firmware's
+// bezel-safe layout (see CONTENT_W in src/ui/screen.cpp).
+const SCREEN_W = 320, CONTENT_W = 304;
 const L = { PRICE_Y_TOP: 6, PRICE_Y_H: 104, PRICE_LEFT_PAD: 8,
             DELTA_Y_TOP: 116, DELTA_H: 22,
-            CDC_ROW_TOP: 144, CDC_ROW_H: 36, CDC_CARD_X: 8, CDC_CARD_W: 304,
+            CDC_ROW_TOP: 144, CDC_ROW_H: 36, CDC_CARD_X: 8, CDC_CARD_W: CONTENT_W - 16,
             CDC_BASE_Y: 162, CDC_MAX_H: 13, CDC_MIN_H: 2,
             FEES_Y_TOP: 186, FEES_Y_H: 30, FEES_X0: 8, CHIP_W: 68, CHIP_GAP: 6,
             STATUS_Y_TOP: 218, STATUS_H: 22 };
@@ -364,7 +368,7 @@ function microLabel(txt, x, yMid, color, align = 'left') {
 }
 
 function drawStatus() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.STATUS_Y_TOP, 320, L.STATUS_H);
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.STATUS_Y_TOP, CONTENT_W, L.STATUS_H);
   const dot = S.netState === 1 ? THEME.green : S.netState === 0 ? THEME.orange : THEME.red;
   let r = 4;
   if (S.netState === 1) {
@@ -380,7 +384,7 @@ function drawStatus() {
   const sRom = `${Math.round(simFlash)}`;
   const sRam = `${Math.round(simRam)}`;
 
-  if (labelRight + 8 <= 144) {
+  if (labelRight + 8 <= 128) {
     ctx.textBaseline = 'middle';
     const y = L.STATUS_Y_TOP + 10;
     ctx.font = `9px ${MONO}`;
@@ -388,43 +392,43 @@ function drawStatus() {
     // CPU block
     ctx.textAlign = 'left';
     ctx.fillStyle = THEME.muted;
-    ctx.fillText('CPU ', 144, y);
+    ctx.fillText('CPU ', 128, y);
     ctx.textAlign = 'right';
     ctx.fillStyle = THEME.text;
-    ctx.fillText(sCpu, 186, y);
+    ctx.fillText(sCpu, 170, y);
     ctx.textAlign = 'left';
-    ctx.fillText('%', 186, y);
+    ctx.fillText('%', 170, y);
 
     // ROM block
     ctx.textAlign = 'left';
     ctx.fillStyle = THEME.muted;
-    ctx.fillText('ROM ', 204, y);
+    ctx.fillText('ROM ', 188, y);
     ctx.textAlign = 'right';
     ctx.fillStyle = THEME.text;
-    ctx.fillText(sRom, 246, y);
+    ctx.fillText(sRom, 230, y);
     ctx.textAlign = 'left';
-    ctx.fillText('%', 246, y);
+    ctx.fillText('%', 230, y);
 
     // RAM block
     ctx.textAlign = 'left';
     ctx.fillStyle = THEME.muted;
-    ctx.fillText('RAM ', 264, y);
+    ctx.fillText('RAM ', 248, y);
     ctx.textAlign = 'right';
     ctx.fillStyle = THEME.text;
-    ctx.fillText(sRam, 306, y);
+    ctx.fillText(sRam, 290, y);
     ctx.textAlign = 'left';
-    ctx.fillText('%', 306, y);
+    ctx.fillText('%', 290, y);
   }
-  ctx.fillStyle = THEME.border; ctx.fillRect(0, L.STATUS_Y_TOP, 320, 1);   // hairline
+  ctx.fillStyle = THEME.border; ctx.fillRect(0, L.STATUS_Y_TOP, CONTENT_W, 1);   // hairline
 }
 
 // mirrors the firmware's PriceFont: height-filling mono digits, squeezed
 // horizontally so a 6-digit price still fits the row (gen_price_font.py)
 function drawPrice() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, 320, L.PRICE_Y_H);
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.PRICE_Y_TOP, CONTENT_W, L.PRICE_Y_H);
   const stale = !S.priceOkMs || Date.now() - S.priceOkMs > CONFIG.PRICE_STALE_MS;
   const txt = S.price > 0 ? fmtThousands(S.price) : '-----';
-  const maxW = 320 - 2 * L.PRICE_LEFT_PAD;
+  const maxW = CONTENT_W - 2 * L.PRICE_LEFT_PAD;
   // ~FONT_PX from gen script (yAdvance fills PRICE_Y_H); canvas then h-scales
   const fontPx = Math.floor(L.PRICE_Y_H * 0.9);
   ctx.font = `bold ${fontPx}px ${MONO}`;
@@ -461,9 +465,10 @@ function pill(txt, x, yTop, fg, fill, rightAlign) {
 // delta row under the price: 24h-change pill (left), F&G label + pill (right)
 function drawDelta() {
   ctx.fillStyle = THEME.bg;
-  ctx.fillRect(0, L.DELTA_Y_TOP, 320, L.DELTA_H);
+  ctx.fillRect(0, L.DELTA_Y_TOP, CONTENT_W, L.DELTA_H);
   const fngStale = !S.fngOkMs || Date.now() - S.fngOkMs > fngStaleMs();
   const cy = L.DELTA_Y_TOP + L.DELTA_H / 2;
+  const fngRight = CONTENT_W - L.PRICE_LEFT_PAD;
   if (!isNaN(S.changePct)) {
     const c = (S.changePct >= 0 ? '+' : '') + Math.round(S.changePct) + '%';
     const fg = S.changePct >= 0 ? THEME.green : THEME.red;
@@ -473,14 +478,14 @@ function drawDelta() {
     const band = fngColor(S.fng);
     const fg   = fngStale ? THEME.dim : band;
     const fill = fngStale ? THEME.surface : tint(band);
-    const w = pill(String(S.fng), 312, L.DELTA_Y_TOP, fg, fill, true);
-    microLabel('FEAR & GREED', 312 - w - 8, cy, THEME.muted, 'right');
+    const w = pill(String(S.fng), fngRight, L.DELTA_Y_TOP, fg, fill, true);
+    microLabel('FEAR & GREED', fngRight - w - 8, cy, THEME.muted, 'right');
   }
 }
 
 function drawCDC() {
   ctx.fillStyle = THEME.bg;
-  ctx.fillRect(0, L.CDC_ROW_TOP, 320, L.CDC_ROW_H);
+  ctx.fillRect(0, L.CDC_ROW_TOP, CONTENT_W, L.CDC_ROW_H);
   ctx.fillStyle = THEME.surface;
   ctx.beginPath();
   ctx.roundRect(L.CDC_CARD_X, L.CDC_ROW_TOP, L.CDC_CARD_W, L.CDC_ROW_H, 10);
@@ -511,7 +516,7 @@ function drawCDC() {
 }
 
 function drawFees() {
-  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.FEES_Y_TOP, 320, L.FEES_Y_H);
+  ctx.fillStyle = THEME.bg; ctx.fillRect(0, L.FEES_Y_TOP, CONTENT_W, L.FEES_Y_H);
   const stale = !S.feesOkMs || Date.now() - S.feesOkMs > CONFIG.FEES_STALE_MS;
   const names = ['NO', 'LOW', 'MED', 'HIGH'];
   const vals = [S.fees.no, S.fees.low, S.fees.med, S.fees.high];
@@ -533,63 +538,79 @@ function drawFees() {
 
 function drawOffline() {
   ctx.fillStyle = THEME.bg;
-  ctx.fillRect(0, 0, 320, L.STATUS_Y_TOP);
+  ctx.fillRect(0, 0, CONTENT_W, L.STATUS_Y_TOP);
 
-  // centered card with a wifi glyph built from arcs (fan over the top)
+  // centered card with a wifi glyph built from arcs (fan over the top);
+  // centered on CONTENT_W, not the physical panel width
+  const cx = CONTENT_W / 2;
   ctx.fillStyle = THEME.surface;
-  ctx.beginPath(); ctx.roundRect(36, 27, 248, 164, 16); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(cx - 124, 27, 248, 164, 16); ctx.fill();
   ctx.strokeStyle = THEME.orange; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
   for (const r of [9, 17, 25]) {
-    ctx.beginPath(); ctx.arc(160, 101, r, -3 * Math.PI / 4, -Math.PI / 4); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, 101, r, -3 * Math.PI / 4, -Math.PI / 4); ctx.stroke();
   }
   ctx.beginPath(); ctx.fillStyle = THEME.orange;
-  ctx.arc(160, 101, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.arc(cx, 101, 3, 0, Math.PI * 2); ctx.fill();
 
   ctx.fillStyle = THEME.text;
   ctx.font = `bold 13px ${SANS}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('No Wi-Fi Connection', 160, 135);
+  ctx.fillText('No Wi-Fi Connection', cx, 135);
 
   ctx.font = `12px ${SANS}`;
   ctx.fillStyle = THEME.text2;
-  ctx.fillText('reconnecting to network...', 160, 159);
+  ctx.fillText('reconnecting to network...', cx, 159);
   ctx.fillStyle = THEME.muted;
-  ctx.fillText('Setup AP: BTC-Ticker', 160, 179);
+  ctx.fillText('Setup AP: BTC-Ticker', cx, 179);
 }
 
-let wasOffline = false;
-let offlineDrawn = false;
-let needClear = true;
 let screenFlipped = false;
+
+// ── Pixel-shift burn-in mitigation — mirrors setOrigin() in screen.cpp ──
+// Every PIXEL_SHIFT_INTERVAL_MS the whole UI nudges PIXEL_SHIFT_PX in a
+// clockwise cycle (center -> right -> down -> left -> up -> center...) so no
+// physical pixel stays lit continuously on this always-on kiosk. Applied via
+// ctx.translate() around the content draws; the CONTENT_W clear and the
+// right-margin blackout stay in absolute coordinates so a stale strip from
+// the previous phase never lingers and the bezel margin never shifts.
+const PIXEL_SHIFT_PX = 5;
+const PIXEL_SHIFT_INTERVAL_MS = 3 * 60 * 1000;
+const PIXEL_SHIFT_TABLE = [[0, 0], [PIXEL_SHIFT_PX, 0], [0, PIXEL_SHIFT_PX],
+                           [-PIXEL_SHIFT_PX, 0], [0, -PIXEL_SHIFT_PX]];
+let shiftPhase = 0;
+let nextShiftAt = Date.now() + PIXEL_SHIFT_INTERVAL_MS;
 
 function render() {
   const isOffline = (S.netState === 2);
-  if (isOffline !== wasOffline) {
-    wasOffline = isOffline;
-    offlineDrawn = false;
-    needClear = true;
+
+  if (Date.now() >= nextShiftAt) {
+    shiftPhase = (shiftPhase + 1) % PIXEL_SHIFT_TABLE.length;
+    nextShiftAt += PIXEL_SHIFT_INTERVAL_MS;
+    log(`pixel shift: phase ${shiftPhase} (${PIXEL_SHIFT_TABLE[shiftPhase]})`);
   }
 
-  if (needClear) {
-    ctx.fillStyle = THEME.bg;
-    ctx.fillRect(0, 0, 320, 240);
-    needClear = false;
-  }
+  // full content-area clear every frame in absolute coordinates so no stale
+  // pixels from a previous shift phase linger at the trailing edge
+  ctx.fillStyle = THEME.bg;
+  ctx.fillRect(0, 0, CONTENT_W, 240);
 
   // CSS rotate mirrors firmware setRotation(1) ↔ setRotation(3)
   cvs.style.transform = screenFlipped ? 'rotate(180deg)' : '';
 
+  const [sx, sy] = PIXEL_SHIFT_TABLE[shiftPhase];
+  ctx.save();
+  ctx.translate(sx, sy);
   drawStatus();
+  if (isOffline) drawOffline();
+  else { drawPrice(); drawDelta(); drawCDC(); drawFees(); }
+  ctx.restore();
 
-  if (isOffline) {
-    if (!offlineDrawn) {
-      drawOffline();
-      offlineDrawn = true;
-    }
-  } else {
-    drawPrice(); drawDelta(); drawCDC(); drawFees();
-  }
+  // Safety overlay: force the rightmost SCREEN_W-CONTENT_W px to pure
+  // black every frame, mirroring drawRightMargin() in screen.cpp — nothing
+  // drawn above should ever bleed past CONTENT_W, but this guarantees it.
+  ctx.fillStyle = '#000';
+  ctx.fillRect(CONTENT_W, 0, SCREEN_W - CONTENT_W, 240);
 
   updateNetState();
   updateBacklight();
@@ -646,7 +667,6 @@ brightnessSlider.addEventListener('input', () => {
 // Flip toggle → rotate canvas 180°
 flipCheckbox.addEventListener('change', () => {
   screenFlipped = flipCheckbox.checked;
-  needClear = true;
   log(`settings: screen ${screenFlipped ? 'flipped 180°' : 'back to normal'}`);
 });
 

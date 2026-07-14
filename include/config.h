@@ -49,6 +49,14 @@
 // keeps flash wear negligible while boot always has a recent value to paint
 #define CACHE_SAVE_MS      (5 * 60000UL)
 
+// ── Burn-in mitigation ────────────────────────────────────
+// This is an always-on kiosk, so the whole UI periodically nudges by a few
+// px in a clockwise cycle (center -> right -> down -> left -> up -> center)
+// so no single physical pixel stays lit for hours. See setOrigin() use in
+// screen.cpp.
+#define PIXEL_SHIFT_PX          5
+#define PIXEL_SHIFT_INTERVAL_MS (3UL * 60 * 1000)
+
 // ── CYD pins (ESP32-2432S028R) ───────────────────────────
 #define PIN_BACKLIGHT  21
 #define PIN_LDR        34   // photoresistor, analog

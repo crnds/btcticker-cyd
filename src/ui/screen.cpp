@@ -13,8 +13,10 @@ TFT_eSPI tft;
 static uint8_t screenRot = 1;
 
 // [SETTINGS] text button, top-left corner — GLCD font 1 (6x8) at text size 1
-#define SETTINGS_BTN_X       4   // margin from screen edge
-#define SETTINGS_BTN_Y       4
+// margin from screen edge — kept >= PIXEL_SHIFT_PX so the button never
+// clips off-panel during the "left"/"up" pixel-shift phases
+#define SETTINGS_BTN_X       6
+#define SETTINGS_BTN_Y       6
 #define SETTINGS_BTN_PAD_X   4   // border padding around the text
 #define SETTINGS_BTN_PAD_Y   3
 #define SETTINGS_BTN_HIT_PAD 8   // finger-friendly tap zone around the border
@@ -29,6 +31,13 @@ static uint8_t screenRot = 1;
 // Cards are borderless C_SURFACE fills — elevation comes from contrast with
 // C_BG, no drawn borders (they band on the TFT at these dark levels).
 // PriceFont is generated to fill PRICE_Y_H (scripts/gen_price_font.py).
+//
+// The physical panel is 320px wide, but the rightmost 16px (5%) of this unit
+// sit under the case bezel and must stay black — every row below is laid
+// out within CONTENT_W, and drawRightMargin() blacks out the remainder so
+// nothing ever bleeds past x=CONTENT_W-1.
+#define SCREEN_W     320
+#define CONTENT_W    304
 #define PRICE_Y_TOP  6
 #define PRICE_Y_H    104
 #define PRICE_LEFT_PAD 8
@@ -37,7 +46,7 @@ static uint8_t screenRot = 1;
 #define CDC_ROW_TOP  144
 #define CDC_ROW_H    36
 #define CDC_CARD_X   8
-#define CDC_CARD_W   304
+#define CDC_CARD_W   (CONTENT_W - 2 * CDC_CARD_X)
 #define CDC_BASE_Y   162   // midline the bull/bear bars grow from
 #define CDC_MAX_H    13
 #define CDC_MIN_H    2
@@ -109,11 +118,54 @@ static bool feeEq(float a, float b) {
 
 // loadRotation / saveRotation replaced by loadSettings / saveSettings above
 
+// Safety overlay: forces the rightmost SCREEN_W-CONTENT_W px to pure black
+// regardless of what any draw* fn above did, so nothing can ever bleed past
+// the visible CONTENT_W region under the bezel. Always runs at origin (0,0)
+// so it never moves with the pixel-shift offset below.
+static void drawRightMargin() {
+  tft.fillRect(CONTENT_W, 0, SCREEN_W - CONTENT_W, 240, TFT_BLACK);
+}
+
+// Clears the whole physical panel and re-blackens the bezel margin in
+// absolute coordinates (ignoring whatever pixel-shift origin is active),
+// then restores that origin so the caller's subsequent draws stay shifted.
+// Needed because fillRect/fillScreen apply the current origin too, so a
+// plain fillScreen() while shifted would clip and leave stale pixels behind.
+static void clearPhysicalScreen() {
+  int32_t ox = tft.getOriginX(), oy = tft.getOriginY();
+  tft.setOrigin(0, 0);
+  tft.fillScreen(C_BG);
+  drawRightMargin();
+  tft.setOrigin(ox, oy);
+}
+
+// ── Pixel-shift burn-in mitigation ────────────────────────
+// This is an always-on kiosk, so every PIXEL_SHIFT_INTERVAL_MS the whole UI
+// nudges PIXEL_SHIFT_PX in a clockwise cycle (center -> right -> down ->
+// left -> up -> center...) via TFT_eSPI's setOrigin(), which offsets every
+// subsequent tft/sprite coordinate — none of the draw*() fns need to know
+// about it.
+static const int8_t PIXEL_SHIFT_TABLE[5][2] = {
+  {0, 0}, {PIXEL_SHIFT_PX, 0}, {0, PIXEL_SHIFT_PX}, {-PIXEL_SHIFT_PX, 0}, {0, -PIXEL_SHIFT_PX}
+};
+static uint8_t  shiftPhase  = 0;
+static uint32_t shiftNextMs = 0;
+
+static void applyPixelShift(uint8_t phase) {
+  tft.setOrigin(0, 0);
+  tft.fillScreen(C_BG);
+  drawRightMargin();
+  tft.setOrigin(PIXEL_SHIFT_TABLE[phase][0], PIXEL_SHIFT_TABLE[phase][1]);
+  screenInvalidate();
+}
+
 void screenInit() {
   tft.init();
   loadSettings();
   tft.setRotation(screenRot);
   tft.fillScreen(C_BG);
+  drawRightMargin();
+  shiftNextMs = millis() + PIXEL_SHIFT_INTERVAL_MS;
 }
 
 void screenInvalidate() {
@@ -131,7 +183,8 @@ bool screenIsFlipped() { return screenRot == 3; }
 
 bool screenToggleFlip() {
   screenRot = (screenRot == 1) ? 3 : 1;
-  tft.setRotation(screenRot);
+  tft.setRotation(screenRot);   // resets origin to (0,0) — reapply the shift
+  tft.setOrigin(PIXEL_SHIFT_TABLE[shiftPhase][0], PIXEL_SHIFT_TABLE[shiftPhase][1]);
   saveSettings();
   screenInvalidate();
   return screenIsFlipped();
@@ -177,9 +230,9 @@ int screenSettingsHandleTouch(int16_t x, int16_t y) {
   // Back header band
   if (y < 44) return -2;
 
-  // Brightness row: five equal 64px-wide tiles
+  // Brightness row: five equal tiles across CONTENT_W
   if (y >= 64 && y < 114) {
-    int step = x * 5 / 320;
+    int step = x * 5 / CONTENT_W;
     if (step < 0) step = 0;
     if (step > 4) step = 4;
     blStep = (uint8_t)step;
@@ -188,11 +241,11 @@ int screenSettingsHandleTouch(int16_t x, int16_t y) {
     return step;
   }
 
-  // Flip row: left half = Normal, right half = Flipped. Only report -1
+  // Flip row: left tile = Normal, right tile = Flipped. Only report -1
   // (toggle) when the tapped tile differs from the current state — tapping
   // the already-selected tile must not flip the screen.
   if (y >= 134 && y < 200) {
-    bool wantFlipped = x >= 160;
+    bool wantFlipped = x >= 152;
     return (wantFlipped != screenIsFlipped()) ? -1 : -3;
   }
 
@@ -200,10 +253,10 @@ int screenSettingsHandleTouch(int16_t x, int16_t y) {
 }
 
 static void drawSettingsPage() {
-  tft.fillScreen(C_BG);
+  clearPhysicalScreen();
 
   // ── Back header ────────────────────────────────────
-  tft.fillRect(0, 0, 320, 44, C_SURFACE);
+  tft.fillRect(0, 0, CONTENT_W, 44, C_SURFACE);
   tft.setTextFont(1);
   tft.setTextColor(C_TEXT2, C_SURFACE);
   tft.setTextDatum(ML_DATUM);
@@ -211,8 +264,8 @@ static void drawSettingsPage() {
   tft.setFreeFont(&FreeSansBold9pt7b);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(C_TEXT, C_SURFACE);
-  tft.drawString("Settings", 160, 22);
-  tft.fillRect(0, 44, 320, 1, C_BORDER);  // hairline
+  tft.drawString("Settings", CONTENT_W / 2, 22);
+  tft.fillRect(0, 44, CONTENT_W, 1, C_BORDER);  // hairline
 
   // ── Backlight section ──────────────────────────────
   tft.setTextFont(1);
@@ -221,7 +274,7 @@ static void drawSettingsPage() {
   tft.drawString("BACKLIGHT", 12, 56);
 
   const char* pctLabels[5] = {"20%", "40%", "60%", "80%", "100%"};
-  int colW = 320 / 5;
+  int colW = CONTENT_W / 5;
   for (int i = 0; i < 5; i++) {
     int cx  = i * colW + colW / 2;
     bool sel = (i == (int)blStep);
@@ -234,7 +287,7 @@ static void drawSettingsPage() {
     tft.drawString(pctLabels[i], cx, 87);
   }
 
-  tft.fillRect(0, 122, 320, 1, C_BORDER);  // section divider
+  tft.fillRect(0, 122, CONTENT_W, 1, C_BORDER);  // section divider
 
   // ── Flip screen section ────────────────────────────
   tft.setTextFont(1);
@@ -246,30 +299,30 @@ static void drawSettingsPage() {
   // Left tile: Normal (rotation 0)
   uint16_t normFill = !flipped ? C_ORANGE : C_SURFACE;
   uint16_t normFg   = !flipped ? C_BG     : C_TEXT2;
-  tft.fillSmoothRoundRect(8,   138, 148, 56, 8, normFill, C_BG);
+  tft.fillSmoothRoundRect(8,   138, 140, 56, 8, normFill, C_BG);
   tft.setFreeFont(&FreeSansBold9pt7b);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(normFg, normFill);
-  tft.drawString("Normal", 82, 166);
+  tft.drawString("Normal", 78, 166);
 
   // Right tile: Flipped (rotation 180)
   uint16_t flipFill = flipped ? C_ORANGE : C_SURFACE;
   uint16_t flipFg   = flipped ? C_BG     : C_TEXT2;
-  tft.fillSmoothRoundRect(164, 138, 148, 56, 8, flipFill, C_BG);
+  tft.fillSmoothRoundRect(156, 138, 140, 56, 8, flipFill, C_BG);
   tft.setTextColor(flipFg, flipFill);
-  tft.drawString("Flipped", 238, 166);
+  tft.drawString("Flipped", 226, 166);
 }
 
 void screenMessage(const char* line1, const char* line2) {
-  tft.fillScreen(C_BG);
+  clearPhysicalScreen();
   tft.setTextDatum(MC_DATUM);
   tft.setFreeFont(&FreeSansBold12pt7b);
   tft.setTextColor(C_TEXT, C_BG);
-  tft.drawString(line1, 160, 100);
+  tft.drawString(line1, CONTENT_W / 2, 100);
   if (line2) {
     tft.setTextFont(2);
     tft.setTextColor(C_TEXT2, C_BG);
-    tft.drawString(line2, 160, 140);
+    tft.drawString(line2, CONTENT_W / 2, 140);
   }
   screenInvalidate();
 }
@@ -373,7 +426,7 @@ static void drawStatus() {
   snprintf(sRam, sizeof(sRam), "%d", ramPct);
 
   TFT_eSprite spr = TFT_eSprite(&tft);
-  if (spr.createSprite(320, STATUS_H)) {
+  if (spr.createSprite(CONTENT_W, STATUS_H)) {
     spr.fillSprite(C_BG);
 
     uint16_t dot = S.netState == 1 ? C_GREEN : S.netState == 0 ? C_ORANGE : C_RED;
@@ -387,47 +440,47 @@ static void drawStatus() {
     spr.drawString(label, 26, 10);
     int labelRight = 26 + spr.textWidth(label);
 
-    if (labelRight + 8 <= 144) {
+    if (labelRight + 8 <= 128) {
       spr.setTextFont(1);
       int y = 10;
 
       // CPU block
       spr.setTextColor(C_MUTED, C_BG);
       spr.setTextDatum(ML_DATUM);
-      spr.drawString("CPU ", 144, y);
+      spr.drawString("CPU ", 128, y);
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(C_TEXT, C_BG);
-      spr.drawString(sCpu, 186, y);
+      spr.drawString(sCpu, 170, y);
       spr.setTextDatum(ML_DATUM);
-      spr.drawString("%", 186, y);
+      spr.drawString("%", 170, y);
 
       // ROM block
       spr.setTextColor(C_MUTED, C_BG);
       spr.setTextDatum(ML_DATUM);
-      spr.drawString("ROM ", 204, y);
+      spr.drawString("ROM ", 188, y);
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(C_TEXT, C_BG);
-      spr.drawString(sRom, 246, y);
+      spr.drawString(sRom, 230, y);
       spr.setTextDatum(ML_DATUM);
-      spr.drawString("%", 246, y);
+      spr.drawString("%", 230, y);
 
       // RAM block
       spr.setTextColor(C_MUTED, C_BG);
       spr.setTextDatum(ML_DATUM);
-      spr.drawString("RAM ", 264, y);
+      spr.drawString("RAM ", 248, y);
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(C_TEXT, C_BG);
-      spr.drawString(sRam, 306, y);
+      spr.drawString(sRam, 290, y);
       spr.setTextDatum(ML_DATUM);
-      spr.drawString("%", 306, y);
+      spr.drawString("%", 290, y);
     }
 
-    spr.fillRect(0, 0, 320, 1, C_BORDER);   // hairline above the status band
+    spr.fillRect(0, 0, CONTENT_W, 1, C_BORDER);   // hairline above the status band
     spr.pushSprite(0, STATUS_Y_TOP);
     spr.deleteSprite();
   } else {
     // fallback if sprite allocation fails
-    tft.fillRect(0, STATUS_Y_TOP, 320, STATUS_H, C_BG);
+    tft.fillRect(0, STATUS_Y_TOP, CONTENT_W, STATUS_H, C_BG);
     uint16_t dot = S.netState == 1 ? C_GREEN : S.netState == 0 ? C_ORANGE : C_RED;
     tft.fillSmoothCircle(14, STATUS_Y_TOP + 10, r, dot, C_BG);
 
@@ -439,42 +492,42 @@ static void drawStatus() {
     tft.drawString(label, 26, STATUS_Y_TOP + 10);
     int labelRight = 26 + tft.textWidth(label);
 
-    if (labelRight + 8 <= 144) {
+    if (labelRight + 8 <= 128) {
       tft.setTextFont(1);
       int y = STATUS_Y_TOP + 10;
 
       // CPU block
       tft.setTextColor(C_MUTED, C_BG);
       tft.setTextDatum(ML_DATUM);
-      tft.drawString("CPU ", 144, y);
+      tft.drawString("CPU ", 128, y);
       tft.setTextDatum(MR_DATUM);
       tft.setTextColor(C_TEXT, C_BG);
-      tft.drawString(sCpu, 186, y);
+      tft.drawString(sCpu, 170, y);
       tft.setTextDatum(ML_DATUM);
-      tft.drawString("%", 186, y);
+      tft.drawString("%", 170, y);
 
       // ROM block
       tft.setTextColor(C_MUTED, C_BG);
       tft.setTextDatum(ML_DATUM);
-      tft.drawString("ROM ", 204, y);
+      tft.drawString("ROM ", 188, y);
       tft.setTextDatum(MR_DATUM);
       tft.setTextColor(C_TEXT, C_BG);
-      tft.drawString(sRom, 246, y);
+      tft.drawString(sRom, 230, y);
       tft.setTextDatum(ML_DATUM);
-      tft.drawString("%", 246, y);
+      tft.drawString("%", 230, y);
 
       // RAM block
       tft.setTextColor(C_MUTED, C_BG);
       tft.setTextDatum(ML_DATUM);
-      tft.drawString("RAM ", 264, y);
+      tft.drawString("RAM ", 248, y);
       tft.setTextDatum(MR_DATUM);
       tft.setTextColor(C_TEXT, C_BG);
-      tft.drawString(sRam, 306, y);
+      tft.drawString(sRam, 290, y);
       tft.setTextDatum(ML_DATUM);
-      tft.drawString("%", 306, y);
+      tft.drawString("%", 290, y);
     }
 
-    tft.fillRect(0, STATUS_Y_TOP, 320, 1, C_BORDER);   // hairline above the status band
+    tft.fillRect(0, STATUS_Y_TOP, CONTENT_W, 1, C_BORDER);   // hairline above the status band
   }
 }
 
@@ -490,13 +543,13 @@ static bool drawPrice() {
   dPrice = {v, stale, false};
 
   String txt = v > 0 ? fmtThousands(v) : "-----";
-  int maxW = 320 - 2 * PRICE_LEFT_PAD;
+  int maxW = CONTENT_W - 2 * PRICE_LEFT_PAD;
   tft.setFreeFont(&PriceFont);
   bool useMono = tft.textWidth(txt) > maxW;
   const GFXfont* font = useMono ? &FreeMonoBold24pt7b : &PriceFont;
 
   TFT_eSprite spr = TFT_eSprite(&tft);
-  if (spr.createSprite(320, PRICE_Y_H)) {
+  if (spr.createSprite(CONTENT_W, PRICE_Y_H)) {
     spr.fillSprite(C_BG);
     spr.setFreeFont(font);
     spr.setTextDatum(ML_DATUM);
@@ -506,7 +559,7 @@ static bool drawPrice() {
     spr.deleteSprite();
   } else {
     // fallback if sprite allocation fails
-    tft.fillRect(0, PRICE_Y_TOP, 320, PRICE_Y_H, C_BG);
+    tft.fillRect(0, PRICE_Y_TOP, CONTENT_W, PRICE_Y_H, C_BG);
     tft.setFreeFont(font);
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(stale ? C_DIM : C_TEXT, C_BG);
@@ -534,7 +587,7 @@ static void drawDelta() {
     chgTxt = c;
   }
 
-  tft.fillRect(0, DELTA_Y_TOP, 320, DELTA_H, C_BG);
+  tft.fillRect(0, DELTA_Y_TOP, CONTENT_W, DELTA_H, C_BG);
   if (chgTxt.length()) {
     uint16_t fg = S.changePct >= 0 ? C_GREEN : C_RED;
     drawPill(chgTxt, PRICE_LEFT_PAD, DELTA_Y_TOP, fg, tint565(fg), false);
@@ -543,9 +596,10 @@ static void drawDelta() {
     uint16_t band = fngColor(S.fng);
     uint16_t fg   = fngStale ? C_DIM : band;
     uint16_t fill = fngStale ? C_SURFACE : tint565(band);
-    int w = drawPill(fngTxt, 312, DELTA_Y_TOP, fg, fill, true);
+    int fngRight = CONTENT_W - PRICE_LEFT_PAD;
+    int w = drawPill(fngTxt, fngRight, DELTA_Y_TOP, fg, fill, true);
     const char* lbl = "FEAR & GREED";
-    drawTracked(lbl, 312 - w - 8 - trackedWidth(lbl),
+    drawTracked(lbl, fngRight - w - 8 - trackedWidth(lbl),
                 DELTA_Y_TOP + DELTA_H / 2 - 4, C_MUTED, C_BG);
   }
 }
@@ -555,7 +609,7 @@ static void drawCDC() {
   cdcForce = false;
   drawnCdcVersion = S.cdcVersion;
 
-  tft.fillRect(0, CDC_ROW_TOP, 320, CDC_ROW_H, C_BG);
+  tft.fillRect(0, CDC_ROW_TOP, CONTENT_W, CDC_ROW_H, C_BG);
   tft.fillSmoothRoundRect(CDC_CARD_X, CDC_ROW_TOP, CDC_CARD_W, CDC_ROW_H, 10,
                           C_SURFACE, C_BG);
   if (!S.cdcValid) return;
@@ -598,7 +652,7 @@ static void drawFees() {
       feeEq(vals[3], dFees.high)) return;
   dFees = {vals[0], vals[1], vals[2], vals[3], stale, false};
 
-  tft.fillRect(0, FEES_Y_TOP, 320, FEES_Y_H, C_BG);
+  tft.fillRect(0, FEES_Y_TOP, CONTENT_W, FEES_Y_H, C_BG);
   for (int i = 0; i < 4; i++) {
     int cx = FEES_X0 + i * (CHIP_W + CHIP_GAP);
     tft.fillSmoothRoundRect(cx, FEES_Y_TOP, CHIP_W, FEES_Y_H, 8, C_SURFACE, C_BG);
@@ -613,26 +667,35 @@ static void drawFees() {
 
 static void drawOffline() {
   // centered card with a wifi glyph built from smooth arcs (0° = 6 o'clock,
-  // clockwise, so 135..225 sweeps over the top of the fan)
-  tft.fillSmoothRoundRect(36, 27, 248, 164, 16, C_SURFACE, C_BG);
+  // clockwise, so 135..225 sweeps over the top of the fan); centered on
+  // CONTENT_W, not the physical panel width
+  int cx = CONTENT_W / 2;
+  tft.fillSmoothRoundRect(cx - 124, 27, 248, 164, 16, C_SURFACE, C_BG);
   for (int r = 10; r <= 26; r += 8)
-    tft.drawSmoothArc(160, 101, r, r - 2, 135, 225, C_ORANGE, C_SURFACE);
-  tft.fillSmoothCircle(160, 101, 3, C_ORANGE, C_SURFACE);
+    tft.drawSmoothArc(cx, 101, r, r - 2, 135, 225, C_ORANGE, C_SURFACE);
+  tft.fillSmoothCircle(cx, 101, 3, C_ORANGE, C_SURFACE);
 
   tft.setTextDatum(MC_DATUM);
   tft.setFreeFont(&FreeSansBold9pt7b);
   tft.setTextColor(C_TEXT, C_SURFACE);
-  tft.drawString("No Wi-Fi Connection", 160, 135);
+  tft.drawString("No Wi-Fi Connection", cx, 135);
 
   tft.setTextFont(2);
   tft.setTextColor(C_TEXT2, C_SURFACE);
-  tft.drawString("reconnecting to network...", 160, 159);
+  tft.drawString("reconnecting to network...", cx, 159);
   tft.setTextColor(C_MUTED, C_SURFACE);
-  tft.drawString("Setup AP: " AP_PORTAL_NAME, 160, 179);
+  tft.drawString("Setup AP: " AP_PORTAL_NAME, cx, 179);
 }
 
 // ── render ────────────────────────────────────────────────
 void screenRender() {
+  uint32_t now = millis();
+  if (now >= shiftNextMs) {
+    shiftPhase  = (shiftPhase + 1) % 5;
+    applyPixelShift(shiftPhase);
+    shiftNextMs = now + PIXEL_SHIFT_INTERVAL_MS;
+  }
+
   // ── Settings page — completely isolated, no ticker content runs ──
   if (onSettingsPage) {
     if (!settingsDrawn) {
@@ -654,7 +717,7 @@ void screenRender() {
   }
 
   if (needClear) {
-    tft.fillScreen(C_BG);
+    clearPhysicalScreen();
     needClear = false;
   }
 
@@ -662,7 +725,7 @@ void screenRender() {
 
   if (isOffline) {
     if (!offlineDrawn) {
-      tft.fillRect(0, 0, 320, STATUS_Y_TOP, C_BG);
+      tft.fillRect(0, 0, CONTENT_W, STATUS_Y_TOP, C_BG);
       drawOffline();
       offlineDrawn = true;
       settingsBtnDirty = true;
